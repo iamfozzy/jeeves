@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 306 80" fill="none" role="img" aria-label="Jeeves">
+<g transform="translate(0 8)"><defs><linearGradient id="accent" x1="8" y1="4" x2="54" y2="62" gradientUnits="userSpaceOnUse"><stop stop-color="#bca2ff"/><stop offset="1" stop-color="#e480d7"/></linearGradient></defs>
+<rect width="64" height="64" rx="16" fill="#18171d"/>
+<path d="M27 15h20v23c0 10-6 16-16 16S15 48 15 39h10c0 4 2 6 6 6s6-3 6-7V25H27V15Z" fill="url(#accent)"/>
+  <circle cx="19" cy="20" r="5" fill="#f5eefc"/></g><path d="M98 32v28q0 12-12 12h-4M98 21v1M113 46h27v-4q0-12-13-12t-14 15q0 16 15 16 7 0 12-4M151 46h27v-4q0-12-13-12t-14 15q0 16 15 16 7 0 12-4M188 32l13 28h3l13-28M228 46h27v-4q0-12-13-12t-14 15q0 16 15 16 7 0 12-4M293 33q-5-3-12-3-12 0-12 8 0 7 12 8t12 8q0 8-13 8-8 0-13-4" stroke="#f5eefc" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

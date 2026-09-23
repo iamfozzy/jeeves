@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Install `jeeves` as a terminal command that launches the cockpit (the full
+# experience: the loop's orchestrator + the browser UI). Writes a small
+# self-contained wrapper (not a symlink) that resolves the installed plugin at
+# runtime, so it keeps working after a plugin update moves the version folder.
+#   jeeves-install-cli [dir]     # target dir, default ~/.local/bin
+set -euo pipefail
+dir="${1:-$HOME/.local/bin}"
+mkdir -p "$dir"
+
+# rm -f first: never write *through* a pre-existing symlink into its target.
+rm -f "$dir/jeeves" "$dir/jeeves-cockpit"
+
+cat > "$dir/jeeves" <<'SH'
+#!/usr/bin/env bash
+# Launch the Jeeves cockpit. Resolves the newest installed jeeves plugin.
+set -euo pipefail
+command -v node >/dev/null 2>&1 || { echo "jeeves: 'node' is not on PATH." >&2; exit 1; }
+mjs="$(ls -dt "$HOME"/.claude/plugins/cache/*/jeeves/*/cockpit/bin/cockpit.mjs \
+              "$HOME"/.claude/plugins/marketplaces/*/plugins/jeeves/cockpit/bin/cockpit.mjs 2>/dev/null | head -1 || true)"
+[ -n "${mjs:-}" ] || { echo "jeeves: no installed jeeves plugin found — install it in Claude Code first." >&2; exit 1; }
+exec node "$mjs" "$@"
+SH
+chmod +x "$dir/jeeves"
+
+# Windows (Git Bash / MSYS / Cygwin): PowerShell and cmd can't run the bash wrapper,
+# so also write jeeves.cmd. cmd needs CRLF or it misparses the for blocks.
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) win=1 ;; *) win= ;; esac
+if [ -n "$win" ]; then
+  rm -f "$dir/jeeves.cmd"
+  sed 's/$/\r/' > "$dir/jeeves.cmd" <<'CMD'
+@echo off
+rem Jeeves - launch the cockpit. Resolves the newest installed jeeves plugin at runtime.
+rem   jeeves              start the cockpit, open the browser
+rem   jeeves --no-open    start without opening a browser
+rem   jeeves rebuild      rebuild the UI, then start
+rem   jeeves --where      print the resolved cockpit.mjs and exit
+setlocal
+where node >nul 2>nul || (echo jeeves: 'node' is not on PATH.>&2 & exit /b 1)
+set "MJS="
+for /d %%M in ("%USERPROFILE%\.claude\plugins\cache\*") do (
+  if not defined MJS for /f "delims=" %%V in ('dir /b /ad /o-d "%%M\jeeves" 2^>nul') do (
+    if not defined MJS if exist "%%M\jeeves\%%V\cockpit\bin\cockpit.mjs" set "MJS=%%M\jeeves\%%V\cockpit\bin\cockpit.mjs"
+  )
+)
+if not defined MJS for /d %%M in ("%USERPROFILE%\.claude\plugins\marketplaces\*") do (
+  if not defined MJS if exist "%%M\plugins\jeeves\cockpit\bin\cockpit.mjs" set "MJS=%%M\plugins\jeeves\cockpit\bin\cockpit.mjs"
+)
+if not defined MJS (echo jeeves: no installed jeeves plugin found - install it in Claude Code first.>&2 & exit /b 1)
+if /i "%~1"=="--where" (echo %MJS%& exit /b 0)
+node "%MJS%" %*
+CMD
+  echo "installed: $dir/jeeves and $dir/jeeves.cmd  (run 'jeeves' to launch the cockpit)"
+else
+  echo "installed: $dir/jeeves  (run 'jeeves' to launch the cockpit)"
+fi
+case ":$PATH:" in
+  *":$dir:"*) echo "ready — run 'jeeves' from any terminal." ;;
+  *) if [ -n "$win" ]; then
+       echo "note: $dir is not on your PATH. Add it for PowerShell and cmd with:"
+       echo "  powershell -NoProfile -Command \"[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';$(cygpath -w "$dir")', 'User')\""
+       echo "then open a new terminal."
+     else
+       echo "note: $dir is not on your PATH. Add it, e.g.:"; echo "  echo 'export PATH=\"$dir:\$PATH\"' >> ~/.zshrc && exec \$SHELL"
+     fi ;;
+esac

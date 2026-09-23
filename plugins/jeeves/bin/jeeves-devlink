@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Point the installed plugin cache at this checkout, so edits are live with no
+# hand-syncing. Idempotent — safe to re-run after a plugin update clobbers the link.
+#
+#   jeeves-devlink            link the cache entry to this checkout
+#   jeeves-devlink --status   print where the cache entry currently points
+set -euo pipefail
+
+dev="$(cd "$(dirname "$0")/.." && pwd)"                       # bin/ → checkout root
+cache="$HOME/.claude/plugins/cache/jeeves-dev/jeeves/unknown" # installPath from installed_plugins.json
+
+if [ "${1:-}" = "--status" ]; then
+  if [ -L "$cache" ]; then echo "linked → $(readlink "$cache")"
+  elif [ -e "$cache" ]; then echo "copy (not linked): $cache"
+  else echo "absent: $cache"; fi
+  exit 0
+fi
+
+mkdir -p "$(dirname "$cache")"
+# Back up a real copy once; never clobber a prior backup or the checkout itself.
+if [ -e "$cache" ] && [ ! -L "$cache" ]; then
+  mv "$cache" "$cache.bak-$(date +%Y%m%d-%H%M%S)"
+fi
+rm -f "$cache"
+ln -s "$dev" "$cache"
+echo "linked → $(readlink "$cache")"

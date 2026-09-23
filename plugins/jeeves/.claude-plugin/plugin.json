@@ -1,0 +1,7 @@
+{
+  "name": "jeeves",
+  "description": "Standing dev-assistant loop: monitors your Jira + GitHub and surfaces what needs you — planning, reviews, and change-resolutions as suggestions you initiate (plan/review/resolve), never on its own; on your go-ahead it dispatches worker agents. Engine + worker agents ship here, plus a local browser cockpit (run /jeeves:cockpit); your projects and memory live in a personal data home set up with /jeeves:setup.",
+  "author": {
+    "name": "iamfozzy"
+  }
+}
