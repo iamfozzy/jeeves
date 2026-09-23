@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Jeeves — launch the cockpit: the full experience (the monitoring loop's own
+# orchestrator plus the browser UI). First run installs deps and builds the UI
+# (~1 min); later runs are instant.
+#   jeeves              start the cockpit, open the browser
+#   jeeves --no-open    start without opening a browser
+#   jeeves rebuild      rebuild the UI, then start
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+command -v node >/dev/null 2>&1 || { echo "jeeves: 'node' is not on PATH." >&2; exit 1; }
+exec node "$here/../cockpit/bin/cockpit.mjs" "$@"

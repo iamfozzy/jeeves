@@ -1,0 +1,196 @@
+html, body, #root { height: 100%; margin: 0; }
+
+/* Make light-dark() resolve from the Mantine scheme, and expose the app's
+   adaptive surfaces/borders as tokens so components flip with one source. */
+:root[data-mantine-color-scheme="light"] { color-scheme: light; }
+:root[data-mantine-color-scheme="dark"] { color-scheme: dark; }
+:root {
+  --ck-page:    light-dark(#ebe9f0, #0d0c11); /* the app background around the panels */
+  --ck-surface: light-dark(#ffffff, var(--mantine-color-dark-7));
+  --ck-border:  light-dark(var(--mantine-color-gray-4), var(--mantine-color-dark-5));
+  --ck-divider: light-dark(var(--mantine-color-gray-3), #211f26);
+  --ck-hover:   light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-6));
+  --ck-active:  light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-5));
+  --ck-repo:    light-dark(var(--mantine-color-gray-6), var(--mantine-color-dark-2)); /* sidebar repo headers */
+  --ck-yellow:  light-dark(var(--mantine-color-yellow-8), var(--mantine-color-yellow-5)); /* yellow-5 washes out on white */
+  /* Subtle full-row tint for the user's OWN items (their PR / assigned work). */
+  --ck-mine:    light-dark(rgba(217, 94, 214, .045), rgba(217, 94, 214, .085));
+}
+body { background: var(--ck-page); }
+/* Light mode: Mantine's dimmed text (gray-6, ~3.3:1 on white) carries labels, repo
+   tags and sub-lines; gray-7 keeps it secondary but readable (~9:1). */
+:root[data-mantine-color-scheme="light"] { --mantine-color-dimmed: var(--mantine-color-gray-7); }
+/* AppShell's own edges (header, sidebar) use the same border tone as the panels.
+   Same specificity as Mantine's scheme-scoped rule; this sheet loads after it. */
+[data-mantine-color-scheme] .mantine-AppShell-root { --app-shell-border-color: var(--ck-border); }
+
+/* Scrollbars — thin, subtle, themed (WebKit + Firefox). */
+* { scrollbar-width: thin; scrollbar-color: light-dark(rgba(0,0,0,.22), rgba(255,255,255,.16)) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: light-dark(rgba(0,0,0,.2), rgba(255,255,255,.14));
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: light-dark(rgba(0,0,0,.34), rgba(255,255,255,.28)); background-clip: padding-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* Hover affordances Mantine's inline styles can't express. */
+/* Space tabs: square, full-height, underlined when active — like the panel's tabs. */
+.ck-tab { cursor: pointer; transition: background .1s ease, opacity .1s ease; }
+.ck-tab:hover { background: var(--ck-hover); }
+.ck-tab[data-active="true"] { box-shadow: inset 0 -2px 0 var(--mantine-color-cockpit-filled); }
+/* Drag to reorder: the dragged tab fades; a bar marks where it will land. */
+.ck-tab { position: relative; }
+.ck-tab[data-dragging] { opacity: .45; }
+.ck-tab[data-drop]::before { content: ''; position: absolute; top: 8px; bottom: 8px; width: 2px; border-radius: 1px; background: var(--mantine-color-cockpit-filled); }
+.ck-tab[data-drop="before"]::before { left: -1px; }
+.ck-tab[data-drop="after"]::before { right: -1px; }
+.ck-space { cursor: pointer; transition: background .1s ease; }
+.ck-space:not([data-active="true"]):hover { background: var(--ck-hover); }
+/* Status dot pinned to a sidebar row's logo; the ring matches the row behind it. */
+.ck-badge { box-shadow: 0 0 0 2px var(--ck-surface); }
+.ck-space:hover .ck-badge { box-shadow: 0 0 0 2px var(--ck-hover); }
+.ck-space[data-active="true"] .ck-badge { box-shadow: 0 0 0 2px var(--ck-active); }
+/* Collapsible, full-bleed project header row in the sidebar. */
+.ck-proj { cursor: pointer; transition: background .1s ease; }
+.ck-proj:hover { background: var(--ck-hover); }
+.ck-sechead { cursor: pointer; user-select: none; }
+.ck-sechead:hover .ck-label { color: var(--mantine-color-text); }
+/* Changed-file rows in the space git panel. */
+
+/* PR/review rows that open a description modal. */
+.ck-prrow:hover { opacity: .82; }
+/* A branch name set off as a chip (the PR modal's base ← head). */
+.ck-chip { padding: 1px 6px; border-radius: 4px; background: var(--ck-hover); min-width: 0; }
+/* The changes panel's PR card. */
+@keyframes ck-spin { to { transform: rotate(360deg); } }
+.ck-spin { animation: ck-spin 1.2s linear infinite; }
+/* Space panel tabs: underlined, compact, equal widths, dimmed until active. */
+.ck-ptabs { --tab-border-color: var(--ck-divider); }
+.ck-ptabs .mantine-Tabs-tab { flex: 1 1 0; min-width: 0; border-radius: 0; padding: 9px 8px 9px; font-size: 13px; font-weight: 500; color: var(--mantine-color-dimmed); }
+.ck-ptabs .mantine-Tabs-tab:hover { background: var(--ck-hover); }
+.ck-ptabs .mantine-Tabs-tab[data-active] { color: var(--mantine-color-text); font-weight: 600; }
+.ck-ptabs .mantine-Tabs-tabSection[data-position="right"] { margin-left: 6px; }
+.ck-ptabs .mantine-Tabs-tabSection[data-position="left"] { margin-right: 5px; }
+/* Settings' vertical tabs: the active tab is a soft highlight, not the accent fill. */
+.mantine-Tabs-tab.ck-stab { color: var(--mantine-color-text); font-size: var(--mantine-font-size-sm); }
+.mantine-Tabs-tab.ck-stab[data-active] { background: var(--ck-active); color: var(--mantine-color-text); font-weight: 600; }
+.ck-row { transition: background .1s ease; }
+/* Type scale: 11px uppercase labels · 12px secondary · 13px code/terminal · 14px primary. */
+.ck-label { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--mantine-color-dimmed); line-height: 1.3; }
+.ck-num { font-variant-numeric: tabular-nums; }
+.ck-row:hover { background: var(--ck-hover); }
+
+/* ── Rendered markdown (PR descriptions, etc.) ───────────────────────────── */
+.ck-md {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--mantine-color-text);
+  word-break: break-word;
+}
+.ck-md > *:first-child { margin-top: 0; }
+.ck-md > *:last-child { margin-bottom: 0; }
+.ck-md p { margin: 0 0 .7em; }
+.ck-md h1, .ck-md h2, .ck-md h3, .ck-md h4 { margin: 1.1em 0 .5em; line-height: 1.3; font-weight: 600; }
+.ck-md h1 { font-size: 1.35em; }
+.ck-md h2 { font-size: 1.2em; padding-bottom: .25em; border-bottom: 1px solid var(--ck-divider); }
+.ck-md h3 { font-size: 1.05em; }
+.ck-md h4 { font-size: .95em; color: var(--mantine-color-dimmed); }
+.ck-md a { color: light-dark(var(--mantine-color-cockpit-7), var(--mantine-color-cockpit-3)); text-decoration: none; }
+.ck-md a:hover { text-decoration: underline; }
+.ck-md ul, .ck-md ol { margin: 0 0 .7em; padding-left: 1.4em; }
+.ck-md li { margin: .15em 0; }
+.ck-md li::marker { color: var(--mantine-color-dimmed); }
+.ck-md code {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: .86em;
+  background: var(--ck-hover);
+  border: 1px solid var(--ck-divider);
+  border-radius: 4px;
+  padding: .08em .34em;
+}
+.ck-md pre {
+  background: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-8));
+  border: 1px solid var(--ck-divider);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 0 0 .7em;
+}
+.ck-md pre code { background: none; border: 0; padding: 0; font-size: .86em; }
+.ck-md blockquote {
+  margin: 0 0 .7em;
+  padding: .1em 0 .1em .9em;
+  border-left: 3px solid var(--ck-border);
+  color: var(--mantine-color-dimmed);
+}
+.ck-md table { border-collapse: collapse; margin: 0 0 .7em; display: block; overflow-x: auto; }
+.ck-md th, .ck-md td { border: 1px solid var(--ck-divider); padding: .35em .6em; text-align: left; }
+.ck-md th { background: var(--ck-hover); font-weight: 600; }
+.ck-md hr { border: 0; border-top: 1px solid var(--ck-border); margin: 1em 0; }
+.ck-md img { max-width: 100%; border-radius: 6px; }
+.ck-md input[type="checkbox"] { margin-right: .45em; vertical-align: middle; }
+
+/* Dashboard ticket/PR links → Jira / GitHub. */
+.ck-link { color: light-dark(var(--mantine-color-cockpit-7), var(--mantine-color-cockpit-3)); text-decoration: none; }
+.ck-link:hover { text-decoration: underline; }
+
+.ck-x { opacity: 0; transition: opacity .12s ease; }
+.ck-space:hover .ck-x,
+.ck-proj:hover .ck-x,
+.ck-space[data-active="true"] .ck-x,
+.ck-tab:hover .ck-x,
+.ck-file:hover .ck-x,
+.ck-tab[data-active="true"] .ck-x,
+.ck-x[aria-expanded="true"] { opacity: 1; }
+
+/* ── Phones (below Mantine's sm breakpoint) ─────────────────────────────────
+   Everything here is scoped to small or touch screens; the desktop layout never
+   matches it. !important beats the components' inline desktop sizes. */
+@media (hover: none) {
+  /* No hover on touch: row/tab close and detail buttons stay visible. */
+  .ck-x { opacity: 1; }
+}
+@media (max-width: 47.99em) {
+  /* Orchestrator: terminal and dashboard share one full-width pane, switched above. */
+  .ck-orch { flex-direction: column; }
+  .ck-orch-term { border-right: 0 !important; min-height: 0; }
+  .ck-orch-dash { width: auto !important; flex: 1 !important; min-height: 0; }
+  .ck-orch[data-pane="terminal"] .ck-orch-dash,
+  .ck-orch[data-pane="dashboard"] .ck-orch-term { display: none; }
+
+  /* Space / worker git panel: stacked under the terminal instead of beside it. */
+  .ck-split { flex-direction: column; }
+  .ck-split .ck-sidepanel {
+    width: auto !important;
+    height: 42% !important;
+    border-left: 0 !important;
+    border-top: 1px solid var(--ck-border);
+  }
+
+  /* Modals fill the screen. */
+  .mantine-Modal-inner { padding: 0 !important; }
+  .mantine-Modal-content {
+    flex: 0 0 100% !important;
+    max-width: 100% !important;
+    max-height: 100dvh !important;
+    border-radius: 0 !important;
+  }
+
+  /* Settings: the vertical tab rail becomes a scrolling strip across the top. */
+  .ck-settings .mantine-Modal-content { height: 100dvh !important; }
+  .ck-settings .mantine-Tabs-root { flex-direction: column; }
+  .ck-settings .mantine-Tabs-list {
+    flex-direction: row !important;
+    flex-wrap: nowrap;
+    width: auto !important;
+    overflow-x: auto;
+    border-right: 0 !important;
+    border-bottom: 1px solid var(--ck-border);
+  }
+  .ck-settings .mantine-Tabs-tab { flex: none; }
+  .ck-settings .mantine-Tabs-panel { min-height: 0; }
+}

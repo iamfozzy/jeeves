@@ -1,0 +1,14 @@
+{
+  "name": "jeeves",
+  "description": "Jeeves: a standing dev-assistant loop for Claude Code, with a local browser cockpit.",
+  "owner": {
+    "name": "iamfozzy"
+  },
+  "plugins": [
+    {
+      "name": "jeeves",
+      "source": "./plugins/jeeves",
+      "description": "Standing dev-assistant loop: Jira + GitHub monitoring, plan-before-code gate, worker agents, and a local browser cockpit."
+    }
+  ]
+}
