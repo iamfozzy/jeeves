@@ -248,8 +248,10 @@ Milestone — merges Monday"). **Write rule:** write a project's ledger only whe
 added, changed, or removed — never to stamp a tick. No prose, no tick notes, no history. An item
 that resolves (PR merged, ticket done, worker closed) loses its row; if it's worth a line in the
 daily summary, it becomes a `done` row, and `done` rows older than 24 h are deleted on the next
-write. Under the cockpit write it with `write_state({ project, markdown })` (the whole file) — not
-Edit/Write — otherwise edit the file directly. Never mention the write.
+write. **Under the cockpit, every ledger write — each `state.md`, and `reminders.md` — goes
+through `write_state` with the whole file, never Edit/Write**, however small the change: an Edit
+prints a diff into the user's terminal on every tick. The cockpit refuses Edit/Write on those files.
+Headless, edit the file directly. Never mention the write.
 
 ## How to report
 Actions first, then a dashboard readable in one glance. Colour carries the signal — a status

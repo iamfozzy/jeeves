@@ -64,7 +64,9 @@ lifecycle hooks (`SessionStart`, `UserPromptSubmit`, `Notification`, `Stop`, `Se
 `bin/hook.mjs`, which posts `{ id, status, sessionId }` to `/api/hook`; and a `theme` matching the
 browser's colour scheme (the variant of the user's Claude Code theme — `dark-ansi` becomes
 `light-ansi` in a light UI). Workers and claude tabs also get an inline `--mcp-config` for `/mcp`
-with their role and `sid`, which gives them the [child-tab tools](#child-tabs). The hooks drive the status dots (working · awaiting · idle · exited)
+with their role and `sid`, which gives them the [child-tab tools](#child-tabs). The orchestrator
+also gets a `PreToolUse` hook (`bin/guard-ledger.mjs`) that refuses Edit/Write/MultiEdit on
+`<data-home>/projects/*/state.md` and `reminders.md`, telling it to use `write_state` instead. The hooks drive the status dots (working · awaiting · idle · exited)
 and let the server follow the live session id across `/clear` and `/resume`, so a respawn resumes
 the current conversation. A worker's `report` outcome (done / blocked / error) sticks; hooks never
 overwrite it.
