@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { TOKEN } from './token'
-import type { Layout, OpenSpaceCmd, OrchContext, SpaceCmd, Surface, WorkerSpace } from './types'
+import type { Layout, OpenSpaceCmd, OrchContext, Reminder, SpaceCmd, Surface, WorkerSpace } from './types'
 
 const rid = () => Math.random().toString(36).slice(2, 8)
 // This browser's id: layout saves carry it, so the server's echo of our own save is skipped.
@@ -23,6 +23,8 @@ export function useCockpitEvents() {
   const [spaceCmds, setSpaceCmds] = useState<SpaceCmd[]>([])
   // The shared layout, when another browser saved it.
   const [remoteLayout, setRemoteLayout] = useState<Layout | null>(null)
+  // Every row of reminders.md, pushed whenever the file changes.
+  const [reminders, setReminders] = useState<Reminder[]>([])
 
   useEffect(() => {
     let stop = false
@@ -44,6 +46,7 @@ export function useCockpitEvents() {
           else if (m.t === 'sessions') setSessions(m.statuses || {})
           else if (m.t === 'sessionStatus') setSessions((prev) => ({ ...prev, [m.sid]: m.status }))
           else if (m.t === 'config') setConfigNonce((n) => n + 1)
+          else if (m.t === 'reminders') setReminders(m.reminders || [])
           else if (m.t === 'layout' && m.layout && m.from !== CLIENT_ID) setRemoteLayout(m.layout)
           else if (m.t === 'open_space' && m.cmd) setOpenCmds((prev) => [...prev.slice(-19), m.cmd])
           else if ((m.t === 'add_tab' || m.t === 'close_space') && (m.spaceRef || m.spaceId))
@@ -61,5 +64,5 @@ export function useCockpitEvents() {
     return () => { stop = true; if (retry) clearTimeout(retry); ws?.close() }
   }, [])
 
-  return { surface, workers, context, sessions, configNonce, openCmds, spaceCmds, remoteLayout }
+  return { surface, workers, context, sessions, configNonce, openCmds, spaceCmds, remoteLayout, reminders }
 }

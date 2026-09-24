@@ -22,7 +22,7 @@ last build (or on `rebuild`), starts `server.mjs`, and opens the browser at
 
 ```bash
 npm install
-npm run dev        # web on http://localhost:5173 (Vite), backend on :4177
+npm run dev        # web on http://localhost:4178 (Vite), backend on :4177
 npm run build      # type-check + production bundle the launcher serves
 ```
 
@@ -141,7 +141,7 @@ the cockpit), none exist and the loop falls back to Task dispatch and terminal o
 
 | Tool | Contract |
 |---|---|
-| `surface_render` | Paints the dashboard. Row sections `stories` · `myPrs` · `qa` · `reviews`, plus `reminders`, `inFlight` and `quiet`. Applied in order: a full section replaces that section whole (`[]` clears it; an omitted one is left as is); `upsert: { <section>: [rows] }` replaces each row with the same identity or appends it; `remove: { <section>: [ids] }` deletes by identity. Identity is `<repo>#<number>` for `myPrs` / `reviews` (from `number`, else a leading `#123` in `item`) and `<repo>:<KEY>` for `stories` / `qa` (from `key`, else a leading Jira key); the repo tag matches by id, `owner/name` or bare name. `reminders`, `inFlight` and `quiet` are full-replace only. Returns per-section row counts plus rejected rows (no identity) and remove ids that matched nothing. Rows carry `dot` (`red` · `yellow` · `green` · `white`) and `actions` (`{ label, run }` sends `run` to the orchestrator; `type: true` types it without submitting; `{ label, href }` opens a link). |
+| `surface_render` | Paints the dashboard. Row sections `stories` · `myPrs` · `qa` · `reviews`, plus `inFlight` and `quiet`. Applied in order: a full section replaces that section whole (`[]` clears it; an omitted one is left as is); `upsert: { <section>: [rows] }` replaces each row with the same identity or appends it; `remove: { <section>: [ids] }` deletes by identity. Identity is `<repo>#<number>` for `myPrs` / `reviews` (from `number`, else a leading `#123` in `item`) and `<repo>:<KEY>` for `stories` / `qa` (from `key`, else a leading Jira key); the repo tag matches by id, `owner/name` or bare name. `inFlight` and `quiet` are full-replace only. Returns per-section row counts plus rejected rows (no identity) and remove ids that matched nothing. Rows carry `dot` (`red` · `yellow` · `green` · `white`) and `actions` (`{ label, run }` sends `run` to the orchestrator; `type: true` types it without submitting; `{ label, href }` opens a link). Reminders aren't painted: the server watches `reminders.md` and pushes every row to the dashboard over `/events`. |
 | `dispatch` | `{ agent, repo, prompt, ticket?, branch?, model? }` → `{ workId, sid, cwd, branch }`. Branch defaults to `<agent>-<ticket>`. An `agent` naming an agent file runs the session as it ([Workers](#workers)); the description lists the built-in and user agents with their descriptions, read when each MCP session starts. |
 | `report` | `{ workId, status?, summary, pr?, verdict?, threads? }` — a worker's result. |
 | `inbox` | Drains unacknowledged reports (`peek: true` leaves them). |

@@ -579,10 +579,9 @@ edit it directly:
 - r3 · due 2026-09-23 15:00 · ask Brendan about the RC connector · set 2026-09-23
 ```
 Ids are `r<n>`, the next unused number. Re-read the file every tick — the cockpit's Settings adds,
-snoozes and clears rows too. A reminder whose due time has passed → top of NEEDS YOU, and the
-`reminders` section of `surface_render` (dot red; due within 24 h → no dot), with actions `Done`
-(`done <id>`) and `Snooze 1h` (`snooze <id> 1h`); push it when it first falls due (*Rules*, `notify
-reminders`). `done <id>` deletes the row; `snooze <id> <when>` moves its due time. An overdue
+snoozes and clears rows too. The cockpit's dashboard shows every row of the file itself — never
+paint reminders. A reminder whose due time has passed → top of NEEDS YOU (headless: the reminders
+line of the report), and push it when it first falls due (*Rules*, `notify reminders`). `done <id>` deletes the row; `snooze <id> <when>` moves its due time. An overdue
 reminder stays up until the user acts — never drop one on your own.
 
 ## Daily

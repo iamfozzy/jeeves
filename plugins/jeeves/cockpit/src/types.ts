@@ -133,17 +133,15 @@ export type StoryPhase = 'needs-plan' | 'planning' | 'awaiting-approval' | 'appr
 
 // A one-click launcher chip on a row. run = the exact composer reply; type=true
 // types it without submitting (for a reply the user must complete first).
-export type SurfaceAction = { label: string; run?: string; type?: boolean; href?: string }
+export type SurfaceAction = { label: string; run?: string; type?: boolean; href?: string; onPick?: () => void } // onPick: a UI-side action, no command sent
 
 export type Story = { item: string; key?: string; status?: string; phase?: StoryPhase; dot?: Dot; repo?: string; next?: string; actions?: SurfaceAction[] }
 export type MyPr = { item: string; number?: string | number; checks?: Checks; state?: string; dot?: Dot; repo?: string; next?: string; actions?: SurfaceAction[] }
 export type QaRow = { item: string; key?: string; priority?: string; dot?: Dot; repo?: string; actions?: SurfaceAction[] }
-export type ReminderRow = { id: string; item: string; due?: string; dot?: Dot; actions?: SurfaceAction[] }
 export type ReviewRow = { item: string; number?: string | number; author?: string; checks?: Checks; state?: string; dot?: Dot; repo?: string; next?: string; actions?: SurfaceAction[] }
 
 export type Surface = {
   quiet?: string
-  reminders?: ReminderRow[]
   stories?: Story[]
   myPrs?: MyPr[]
   qa?: QaRow[]

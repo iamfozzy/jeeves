@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { SegmentedControl } from '@mantine/core'
 import { TerminalPane } from './TerminalPane'
 import { Dashboard } from './Dashboard'
-import type { RepoCfg, Surface, WorkerSpace } from './types'
+import type { Reminder, RepoCfg, Surface, WorkerSpace } from './types'
 
 // Left: the real orchestrator claude session in the neutral home (repo-agnostic),
 // booted as `orch` so the backend wires it to the cockpit MCP + a known session id.
@@ -13,12 +13,14 @@ export function OrchestratorView({
   repos,
   surface,
   workers,
+  reminders,
   active
 }: {
   home: string
   repos: RepoCfg[]
   surface: Surface
   workers: WorkerSpace[]
+  reminders: Reminder[]
   active: boolean
 }) {
   const [pane, setPane] = useState<'terminal' | 'dashboard'>('terminal')
@@ -30,7 +32,7 @@ export function OrchestratorView({
         <TerminalPane sid="orch:main" cwd={home} cmd="orch" active={active} />
       </div>
       <div className="ck-orch-dash" style={{ width: 400, flex: 'none', overflowY: 'auto', background: 'var(--ck-surface)' }}>
-        <Dashboard repos={repos} surface={surface} workers={workers} />
+        <Dashboard repos={repos} surface={surface} workers={workers} reminders={reminders} />
       </div>
     </div>
   )

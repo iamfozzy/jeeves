@@ -81,7 +81,8 @@ browser closed.
 
 The right pane of the **Jeeves** view. Sections, top to bottom:
 
-- **Reminders** — ones due now (red) or within 24 hours. Never filtered or folded.
+- **Reminders** — every reminder you've set, soonest first: red once overdue, yellow within 24
+  hours. Done and snooze from the row's ⋮ menu. Never filtered or folded.
 - **Stories** — every sprint ticket assigned to you, with its Jira status and, for tickets in the
   plan flow, its phase (needs plan → planning → awaiting approval → approved → in progress → in
   review).
