@@ -18,7 +18,8 @@ If the data home has no `identity.md`, setup hasn't run. Say so once, point at `
 then continue in generic mode with whatever's available.
 
 ## Launch
-1. Read the engine at `${CLAUDE_PLUGIN_ROOT}/BRIEF.md` and follow it — beginning with its
+1. Read the engine at `${CLAUDE_PLUGIN_ROOT}/BRIEF.md` and follow it. Under the cockpit, load its
+   tools first (BRIEF *Running under the cockpit* — they may be deferred). Then begin with its
    **Step 0 — Resolve the project set**: build the project index and read the open ledger rows in
    one call; a project's full `project.md` is read only when an item touches it. If the cwd sits in
    a configured repo (or `$ARGUMENTS` names one), foreground that project but still watch the rest.

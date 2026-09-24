@@ -1950,7 +1950,7 @@ function buildMcpServer(role, caller) {
     ...custom.map((a) => `- ${a.name} (custom) — ${a.description}`)
   ].join('\n')
   if (full) srv.registerTool('dispatch', {
-    description: 'Dispatch a unit of work to a separate worker session (a new cockpit space) in a fresh worktree. Returns a workId. The worker reports back via the "report" tool; drain results with "inbox".\n'
+    description: 'Dispatch a unit of work to a separate worker session (a new cockpit space) in a fresh worktree. Returns a workId. The worker reports back via the "report" tool; drain results with "inbox". Use this — never the Agent/Task tool — for every agent run while the cockpit is up, ad-hoc asks included.\n'
       + 'When `agent` names one of these agents, the session runs as it (its prompt, tools and model) — the prompt carries only the task:\n'
       + roster + '\n'
       + 'Any other `agent` (e.g. planner, reviewer) is a label: compose the full prompt yourself (role + task).',
