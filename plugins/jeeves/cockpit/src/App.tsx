@@ -79,7 +79,7 @@ export function App() {
   const togglePanel = () => setPanelOpen((v) => { const n = !v; try { localStorage.setItem(PANEL_KEY, n ? '1' : '0') } catch {}; return n })
   // 'repos' = the sidebar's "Open space…" picker; 'switch' = the ⌘P quick switcher.
   const [picker, setPicker] = useState<{ mode: 'repos' | 'switch'; open: boolean }>({ mode: 'repos', open: false })
-  const { surface, workers, context, sessions, configNonce, openCmds, spaceCmds, remoteLayout } = useCockpitEvents()
+  const { surface, workers, context, sessions, configNonce, openCmds, spaceCmds, remoteLayout, reminders } = useCockpitEvents()
   const { setColorScheme } = useMantineColorScheme()
   const scheme = useComputedColorScheme('dark')
   // Below the sm breakpoint the sidebar is a full-screen drawer behind the header's burger;
@@ -432,7 +432,7 @@ export function App() {
           {/* Everything stays mounted; inactive views are hidden so PTY sessions survive a switch. */}
           {home && (
             <div style={{ position: 'absolute', inset: 0, display: activeSpaceId === ORCH ? 'block' : 'none' }}>
-              <OrchestratorView home={home} repos={repos} surface={surface} workers={workers} active={activeSpaceId === ORCH} />
+              <OrchestratorView home={home} repos={repos} surface={surface} workers={workers} reminders={reminders} active={activeSpaceId === ORCH} />
             </div>
           )}
           {scratchRoot && (

@@ -1,13 +1,13 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ActionIcon, Badge, Box, Group, HoverCard, Menu, Select, Stack, Text, Tooltip, UnstyledButton } from '@mantine/core'
 import {
   IconAlarm, IconAlertTriangle, IconCircleCheck, IconExternalLink, IconFileSearch,
   IconGitPullRequest, IconListDetails, IconLoader2, IconSearch, IconTestPipe
 } from '@tabler/icons-react'
-import { sendOrchInput } from './api'
+import { editReminder, sendOrchInput } from './api'
 import { PrModal } from './PrModal'
 import { Section } from './Section'
-import type { Checks, Dot, RepoCfg, Story, StoryPhase, SurfaceAction, Surface, WorkerSpace } from './types'
+import type { Checks, Dot, Reminder, RepoCfg, Story, StoryPhase, SurfaceAction, Surface, WorkerSpace } from './types'
 
 const DOT_VAR: Record<Dot, string> = {
   red: 'var(--mantine-color-red-6)',
@@ -34,6 +34,18 @@ const PHASE: Record<StoryPhase, { color: string; label: string }> = {
   done: { color: 'teal', label: 'done' }
 }
 
+// reminders.md due times are local "YYYY-MM-DD HH:MM".
+const dueAt = (s: string) => { const m = s.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/); return m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]).getTime() : NaN }
+// "overdue 20m" / "due today 15:00" / "due tomorrow 10:00" / "due Fri 25 Sep 10:00".
+function whenDue(s: string, ms: number) {
+  const at = new Date(dueAt(s))
+  if (isNaN(ms)) return 'due ' + s
+  if (ms <= 0) { const m = Math.round(-ms / 60e3); return 'overdue ' + (m < 60 ? `${m}m` : m < 1440 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`) }
+  const hm = s.slice(11), day = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  const days = Math.round((day(at) - day(new Date())) / 864e5)
+  return 'due ' + (days === 0 ? 'today' : days === 1 ? 'tomorrow' : at.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })) + ' ' + hm
+}
+
 const filled = (s?: string): s is string => Boolean(s && s.trim().length > 0)
 const hashOf = (text: string): string | undefined => text.match(/#(\d+)/)?.[1]
 // A row with no dot is neutral: drawn and ranked as white, and collapsed with the calm rows.
@@ -49,7 +61,10 @@ type AnyRow = { item: string; repo?: string; dot?: Dot; number?: string | number
 // A sorted row plus its rank position and identity.
 type View<T> = { r: T; n: number; id: string }
 
-export function Dashboard({ repos, surface, workers }: { repos: RepoCfg[]; surface: Surface; workers: WorkerSpace[] }) {
+export function Dashboard({ repos, surface, workers, reminders: rows }: { repos: RepoCfg[]; surface: Surface; workers: WorkerSpace[]; reminders: Reminder[] }) {
+  // Reminder dots and "overdue" follow the clock, so re-render every minute.
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => { const t = window.setInterval(() => setNow(Date.now()), 60e3); return () => clearInterval(t) }, [])
   const [sent, setSent] = useState<string | null>(null)
   const [prModal, setPrModal] = useState<{ repoId: string; number: string | number; title?: string } | null>(null)
   const flash = (k: string) => { setSent(k); window.setTimeout(() => setSent((s) => (s === k ? null : s)), 1400) }
@@ -132,8 +147,20 @@ export function Dashboard({ repos, surface, workers }: { repos: RepoCfg[]; surfa
     )
   }
 
-  // Reminders are personal, not per repo: never filtered or folded, always on top.
-  const reminders = [...(s?.reminders ?? [])].sort(byRank)
+  // Reminders are personal, not per repo: every row of reminders.md, never filtered or
+  // folded, always on top, soonest first. Done and snooze edit the file directly.
+  const remind = (op: Parameters<typeof editReminder>[0]) => { editReminder(op).catch(() => {}) }
+  const reminders = [...rows].sort((a, b) => a.due.localeCompare(b.due)).map((r) => {
+    const ms = dueAt(r.due) - now
+    return {
+      id: r.id, item: r.what, due: whenDue(r.due, ms), dot: (ms <= 0 ? 'red' : ms < 864e5 ? 'yellow' : undefined) as Dot | undefined,
+      actions: [
+        { label: 'Done', onPick: () => remind({ op: 'done', id: r.id }) },
+        { label: 'Snooze 1h', onPick: () => remind({ op: 'snooze', id: r.id, by: '1h' }) },
+        { label: 'Snooze 1d', onPick: () => remind({ op: 'snooze', id: r.id, by: '1d' }) }
+      ] as SurfaceAction[]
+    }
+  })
   const anything = reminders.length || stories.length || myPrs.length || qa.length || reviews.length
 
   // Shared row: icon (dot-coloured) · text (+ optional sub-line) · right slot · actions.
@@ -229,7 +256,7 @@ export function Dashboard({ repos, surface, workers }: { repos: RepoCfg[]; surfa
           {reminders.map((rm) => row({
             k: rm.id, dot: rm.dot, Icon: IconAlarm, text: rm.item, actions: rm.actions,
             details: [['Due', rm.due]],
-            sub: rm.due ? <Text size="xs" c="dimmed" lh={1.4}>due {rm.due}</Text> : undefined
+            sub: <Text size="xs" c={rm.dot === 'red' ? 'red' : 'dimmed'} lh={1.4}>{rm.due}</Text>
           }))}
         </Section>
       )}
@@ -354,7 +381,7 @@ function Actions({ actions, repo, ghNum, sent, fire }: {
             <Text size="sm">{a.label}</Text>
           </Menu.Item>
         ) : (
-          <Menu.Item key={i} onClick={() => fire(a)}>
+          <Menu.Item key={i} onClick={() => (a.onPick ? a.onPick() : fire(a))}>
             <Group gap={8} justify="space-between" wrap="nowrap">
               <Text size="sm">{a.label}</Text>
               <Text size="xs" c="dimmed" ff="monospace">{a.run}</Text>

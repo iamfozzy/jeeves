@@ -158,7 +158,8 @@ converted to a ledger on the loop's next launch.
 
 Ids are `r<n>`; times are local. Add them by telling Jeeves (`remind …`) or in Settings → Jeeves →
 Reminders (which also marks done, snoozes by 1 h / 1 day, and deletes). The loop re-reads the file
-every tick; a due reminder tops the dashboard and stays until you act on it.
+every tick. The dashboard lists every row, soonest first; an overdue one turns red and stays until
+you act on it.
 
 ## `agents/<name>.md`
 Your own agents, which Jeeves runs when you ask (`run <agent> on <ticket | #pr | repo>`) and may

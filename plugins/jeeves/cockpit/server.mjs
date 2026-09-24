@@ -7,7 +7,7 @@ import { dirname, join, extname, normalize, basename, sep } from 'node:path'
 import { createRequire } from 'node:module'
 import { execFile, execFileSync } from 'node:child_process'
 import { randomBytes, timingSafeEqual, randomUUID, createHash } from 'node:crypto'
-import { openSync, fstatSync, readSync, closeSync, writeFileSync, appendFileSync } from 'node:fs'
+import { openSync, fstatSync, readSync, closeSync, writeFileSync, appendFileSync, watchFile } from 'node:fs'
 import { WebSocketServer } from 'ws'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
@@ -632,6 +632,10 @@ function parseReminders(md) {
     .map((m) => ({ id: m[1], due: m[2], what: m[3], set: m[4] ?? null }))
 }
 const remindersView = () => ({ reminders: parseReminders(readMd(REMINDERS_FILE)) })
+// The dashboard shows every reminder straight from the file, so any writer — the
+// loop's write_state, Settings, a hand edit — reaches every browser.
+const pushReminders = () => broadcast({ t: 'reminders', ...remindersView() })
+watchFile(REMINDERS_FILE, { interval: 2000 }, pushReminders).unref()
 // { op: 'add', what, due } | { op: 'done' | 'delete', id } | { op: 'snooze', id, by: '1h' | '1d' }
 async function editReminders({ op, id, what, due, by } = {}) {
   const raw = readMd(REMINDERS_FILE), md = raw.trim() ? raw : REMINDERS_HEADER
@@ -1481,7 +1485,7 @@ const server = http.createServer(async (req, res) => {
   // ── Static (built app). In dev, Vite serves the UI and proxies /pty + /api here. ──
   if (!existsSync(DIST)) {
     res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
-    res.end('Jeeves Cockpit backend is up. In dev: npm run dev → http://localhost:5173')
+    res.end('Jeeves Cockpit backend is up. In dev: npm run dev → http://localhost:4178')
     return
   }
   const rel = path === '/' ? 'index.html' : normalize(path).replace(/^(\.\.[/\\])+/, '').replace(/^\//, '')
@@ -1921,17 +1925,9 @@ function buildMcpServer(role, caller) {
       + '2. **`upsert: { <section>: [rows] }`**: each row replaces the existing row with the same identity, or is appended; other rows are untouched.\n'
       + '3. **`remove: { <section>: [ids] }`**: deletes the rows with those identities.\n'
       + 'Identity: myPrs/reviews = "<repo>#<number>" (from `number`, else the leading #NNN of `item`); stories/qa = "<repo>:<KEY>" (from `key`, else the leading Jira key of `item`). <repo> is the row\'s repo tag — id, owner/name and bare name all match — or empty when untagged, e.g. "web#1914", ":ABC-5940". An upsert row with no derivable identity is rejected; the result gives per-section row counts and lists rejected rows and remove ids that matched nothing — check it.\n'
-      + '`reminders` (full-replace only) renders above every other section: send every reminder due now (dot red) or within the next 24h (no dot), with Done / Snooze actions; [] once none are pending.\n'
       + 'Send full sections on the first paint of a session or after a restart; after that, send only changes via upsert/remove. Repo-tag rows when more than one project is loaded. Give each row an `actions` list so the user can act with one click.',
     inputSchema: {
       quiet: z.string().optional().describe('One-line quiet-tick summary when nothing needs the user.'),
-      reminders: z.array(z.object({
-        id: z.string().describe('The reminder id from reminders.md.'),
-        item: z.string().describe('What to be reminded of.'),
-        due: z.string().optional().describe('When it is due, as the user would say it, e.g. "today 15:00" or "overdue 20m".'),
-        dot: dot.optional(),
-        actions: z.array(action).optional().describe('e.g. [{label:"Done",run:"done r3"},{label:"Snooze 1h",run:"snooze r3 1h"}].')
-      })).optional(),
       stories: z.array(rowSchemas.stories).optional(),
       myPrs: z.array(rowSchemas.myPrs).optional(),
       qa: z.array(rowSchemas.qa).optional(),
@@ -2335,6 +2331,7 @@ eventsWss.on('connection', (ws, req) => {
   // Prime the new client with the current picture.
   try { ws.send(JSON.stringify({ t: 'surface', payload: bus.surface })) } catch {}
   try { ws.send(JSON.stringify({ t: 'spaces', spaces: workerList() })) } catch {}
+  try { ws.send(JSON.stringify({ t: 'reminders', ...remindersView() })) } catch {}
   try { ws.send(JSON.stringify({ t: 'context', ctx: readOrchContext() })) } catch {}
   try { ws.send(JSON.stringify({ t: 'sessions', statuses: Object.fromEntries(sessionStatus) })) } catch {}
   ws.on('close', () => eventClients.delete(ws))
@@ -2377,7 +2374,7 @@ server.listen(PORT, HOST, () => {
   const [arrow, dot] = WIN ? ['->', '-'] : ['→', '·']
   console.log(`Jeeves Cockpit backend ${arrow} http://${HOST}:${PORT} (loopback only)`)
   console.log(`  open (prod):  ${cockpitUrl()}`)
-  console.log(`  open (dev):   http://localhost:5173/?token=${TOKEN}`)
+  console.log(`  open (dev):   http://localhost:4178/?token=${TOKEN}`)
   console.log(`repos: ${REPOS.map((r) => r.id).join(', ') || '(none — configure a Jeeves project)'}`)
   console.log(`mcp:  http://${HOST}:${PORT}/mcp  ${dot}  orchestrator session ${ORCH_SESSION_ID}`)
   refreshWorktreeRoots() // learn existing worktree paths so restored spaces are allowed after a reload
