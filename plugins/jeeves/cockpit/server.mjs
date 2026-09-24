@@ -1904,10 +1904,12 @@ function buildMcpServer(role, caller) {
       actions: z.array(action).optional().describe('e.g. [{label:"Resolve",run:"resolve 1857"}] when changes are requested.')
     }),
     qa: z.object({
-      item: z.string().describe('Ticket to QA. Lead with the Jira key so it links.'),
+      item: z.string().describe('Ticket whose QA field is the user, any status. Lead with the Jira key so it links.'),
       key: z.string().optional(), priority: z.string().optional().describe('Jira priority, e.g. "Highest".'),
+      status: z.string().optional().describe('Real Jira status, e.g. "In Progress" / "Ready For QA" / "Done". Set it on EVERY row so upcoming, ready and done QA read apart.'),
       dot: dot.optional(), repo: z.string().optional(),
-      actions: z.array(action).optional().describe('Default [{label:"Test",run:"qa <n>"}] — qa <n> prints its testing instructions.')
+      next: z.string().optional().describe('One-line note, e.g. "in review — not ready for QA yet".'),
+      actions: z.array(action).optional().describe('[{label:"Test",run:"qa <KEY>"}] once it is in a QA column — qa <KEY> prints its testing instructions.')
     }),
     reviews: z.object({
       item: z.string().describe('Teammate PR to review. Lead with "#<number>".'),

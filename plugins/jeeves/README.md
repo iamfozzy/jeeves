@@ -86,12 +86,16 @@ The right pane of the **Jeeves** view. Sections, top to bottom:
 - **Stories** — every sprint ticket assigned to you, with its Jira status and, for tickets in the
   plan flow, its phase (needs plan → planning → awaiting approval → approved → in progress → in
   review).
+- **Items for you to QA** — every sprint ticket whose QA field is you, whatever its status,
+  highest priority first: yellow once it reaches a QA column (with a Test action), grey while
+  it's still upstream, green once done.
 - **My PRs** — your open PRs with checks and review state.
-- **QA** — tickets you must test, highest priority first.
 - **Reviews** — teammates' PRs in your review scope.
 - **In flight** — workers running now.
 
-Red and yellow rows show in full; calm rows fold into one "N on track — show" line per section.
+In Stories and QA, every open ticket (To Do included) shows in full and only done tickets fold
+into one "N done — show" line. In the PR sections, red and yellow rows show in full and calm rows
+fold into one "N on track — show" line.
 With more than one repo on the board, a searchable repo filter sits at the top (remembered per
 browser). Jira keys and `#123` link out; clicking a PR row opens its description. Each row's **⋮**
 menu holds its actions (Plan, Approve, Resolve, Review, Test, View plan, Open PR on GitHub…) — each

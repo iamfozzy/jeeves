@@ -26,7 +26,7 @@ own, never merges, and never posts a review you didn't pick the verdict for.**
 
 - **One dashboard for everything** — stories assigned to you this sprint, your open PRs with
   checks and review state, tickets waiting on your QA, teammates' PRs to review, workers in
-  flight, and your reminders. Red means act, yellow means watch, and calm rows fold away.
+  flight, and your reminders. Red means act, yellow means watch, and done or calm rows fold away.
 - **Plan before code** — a ticket entering In Progress surfaces a `plan` suggestion. The plan is
   published to Confluence, linked from the ticket, and revised from ticket comments until you
   approve it.
