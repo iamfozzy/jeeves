@@ -24,3 +24,6 @@ field you don't use.
                                                 #   open non-draft teammate PR (set per project, opt-in)
 - **base branches:** `<qa>`, `<develop>`        # `/jeeves:setup --scan` writes the first that exists on
                                                 #   origin; none → origin's default branch
+
+## Loop
+- **voice:** `plain, direct`                  # how Jeeves talks, e.g. `British, dry`; brevity applies regardless

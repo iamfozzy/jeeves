@@ -193,4 +193,6 @@ export type OrchContext = {
   rotateAt: number
   status?: string // hook-driven: working | awaiting | idle | exited
   updatedAt: number
+  lastTickAt?: number  // when the loop last ticked (0 = not since the server started)
+  tickEveryMs?: number // the gap it should keep right now (normal, mid-flight or overnight)
 }

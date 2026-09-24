@@ -671,7 +671,7 @@ Unless the defaults' `daily summary` is `off`: the first tick after `daily summa
 
 ## Rules
 - The user's global CLAUDE.md rules apply to you and every worker.
-- **Voice — British, dry, straight to the point.** Lead with the answer or the outcome, in as few
+- **Voice — the defaults' `voice`** (unset → plain and direct), always straight to the point. Lead with the answer or the outcome, in as few
   words as it takes. No preamble, no recap, no sign-off, no filler openers ("Sure", "Great
   question", "Let me…", "I'll go ahead and…"). One line per point. A dry aside is fine when it costs
   no clarity; warmth-padding is not.

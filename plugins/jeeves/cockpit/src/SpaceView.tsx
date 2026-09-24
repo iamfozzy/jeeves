@@ -197,18 +197,23 @@ export function SpaceView({
   )
 }
 
-// Shown in a space with no tabs: Jeeves, delighted to have nothing to do, dancing.
+// Shown in a space with no tabs: Jeeves, in top hat and beard, delighted to have nothing
+// to do, dancing.
 // Every frame is padded to the same size so the centred block doesn't jitter.
 const DANCE = [
 String.raw`
+              ______              
+             |      |             
+             |      |             
+          ___|______|___          
             _.------._            
           .'          '.          
          /   __    __   \         
         |    ^     ^     |        
         |        <       |        
      o   \     \___/    /         
-      \   '._        _.'          
-       \     |      |             
+      \   '._\WWWWWW/_.'          
+       \     |\WWWW/|             
         \ ___/\    /\___          
          /   \ \/\/ /   \         
         |     \ () /     |\       
@@ -221,14 +226,18 @@ String.raw`
         __|     |   '--._______)  
         (_______)                 `,
 String.raw`
+              ______              
+             |      |             
+             |      |             
+          ___|______|___          
             _.------._            
           .'          '.          
          /   __    __   \         
         |    ^     ^     |        
         |        <       |        
          \     \___/    /         
-          '._        _.'          
-             |      |             
+          '._\WWWWWW/_.'          
+             |\WWWW/|             
           ___/\    /\___          
      o___/   \ \/\/ /   \___o     
         |     \ () /     |        
@@ -241,14 +250,18 @@ String.raw`
         __|     ||     |__        
         (_______)(_______)        `,
 String.raw`
+              ______              
+             |      |             
+             |      |             
+          ___|______|___          
             _.------._            
           .'          '.          
          /   __    __   \         
         |    ^     ^     |        
         |        <       |        
          \     \___/    /   o     
-          '._        _.'   /      
-             |      |     /       
+          '._\WWWWWW/_.'   /      
+             |\WWWW/|     /       
           ___/\    /\___ /        
          /   \ \/\/ /   \         
        /|     \ () /     |        
@@ -261,14 +274,18 @@ String.raw`
   (_______.--'   |     |__        
                  (_______)        `,
 String.raw`
+              ______              
+             |      |             
+             |      |             
+          ___|______|___          
             _.------._            
           .'          '.          
          /   __    __   \         
         |    ^     ^     |        
         |        <       |        
          \     \___/    /         
-          '._        _.'          
-             |      |             
+          '._\WWWWWW/_.'          
+             |\WWWW/|             
           ___/\    /\___          
      o___/   \ \/\/ /   \___o     
         |     \ () /     |        

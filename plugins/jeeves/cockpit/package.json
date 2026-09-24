@@ -10,6 +10,7 @@
     "dev:web": "vite",
     "build": "tsc --noEmit && vite build",
     "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs",
     "postinstall": "node scripts/postinstall.mjs"
   },
   "dependencies": {

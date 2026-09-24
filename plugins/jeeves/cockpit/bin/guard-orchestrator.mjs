@@ -12,9 +12,9 @@
 //  - Agent/Task is refused: every agent run goes through the cockpit's dispatch.
 // Exit 2 refuses the call and hands the reason to the session. Input it can't read
 // exits 0; a Bash command it can't parse is refused, since Bash is an allowlist.
-import { existsSync, realpathSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { basename, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 
 const [, , home, pluginRoot] = process.argv
 if (!home) process.exit(0)
@@ -36,11 +36,23 @@ function readStdin() {
 let input
 try { input = JSON.parse(await readStdin()) } catch { process.exit(0) }
 const tool = input?.tool_name, ti = input?.tool_input || {}, cwd = input?.cwd || home
-const block = (why) => { process.stderr.write(why + '\n'); process.exit(2) }
+// Each refusal is logged to <data-home>/guard.log (one JSON line; trimmed to its last
+// 500 lines past 256 KB) so Settings can show what the orchestrator was stopped from.
+const LOG = join(home, 'guard.log')
+function logBlock(why) {
+  try {
+    const what = String(ti.command ?? ti.file_path ?? ti.notebook_path ?? ti.path ?? ti.pattern ?? ti.subagent_type ?? '').slice(0, 300)
+    appendFileSync(LOG, JSON.stringify({ at: new Date().toISOString(), tool, what, why: why.replace(/^Blocked: /, '').split(' Dispatch it instead')[0].slice(0, 240) }) + '\n')
+    if (statSync(LOG).size > 256 * 1024) writeFileSync(LOG, readFileSync(LOG, 'utf8').trimEnd().split('\n').slice(-500).join('\n') + '\n')
+  } catch {}
+}
+const block = (why) => { logBlock(why); process.stderr.write(why + '\n'); process.exit(2) }
 const DISPATCH = 'Dispatch it instead: mcp__cockpit__dispatch with agent "story-worker" to change code, "investigator" to look into something, "loop-verifier" to check a result.'
 
 const ci = process.platform === 'win32' ? (s) => s.toLowerCase() : (s) => s
-const real = (p) => { try { return realpathSync(p) } catch { return normalize(p) } }
+// A path that doesn't exist yet (a file about to be written) resolves through its
+// nearest existing ancestor, so /tmp/new.md and a realpath'd /private/tmp still match.
+const real = (p) => { try { return realpathSync(p) } catch { const up = dirname(p); return up === p ? normalize(p) : join(real(up), basename(p)) } }
 const expand = (p) => (p === '~' || p.startsWith('~/') ? join(homedir(), p.slice(1)) : p)
 // The path of p inside root, or null when it's outside. Relative paths resolve
 // against base: the session's cwd, or a Bash command's current cd.

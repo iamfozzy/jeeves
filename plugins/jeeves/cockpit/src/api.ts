@@ -19,6 +19,12 @@ export async function saveLayout(layout: Layout, from: string): Promise<void> {
 }
 
 // A folder space's directory: a typed path (~ expanded) resolved and checked by the server.
+// The orchestrator guard's refusals, newest first.
+export type GuardRow = { at: string; tool: string; what: string; why: string }
+export function getGuardLog(): Promise<{ rows: GuardRow[] }> {
+  return getJson('/api/guard-log')
+}
+
 export type FolderView = { path?: string; name?: string; error?: string; parent?: string | null; dirs?: string[] }
 export function resolveFolder(path: string, list = false): Promise<FolderView> {
   return getJson('/api/folder?path=' + encodeURIComponent(path) + (list ? '&list=1' : ''))

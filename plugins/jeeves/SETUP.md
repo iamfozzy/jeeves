@@ -18,6 +18,7 @@ internals.
   | `projects/<name>/project.md` | One per repo: only what differs from `defaults.md` ([Projects](#projectsnameprojectmd)). |
   | `projects/<name>/state.md` | The loop's ledger of that project's open items ([Ledger](#projectsnamestatemd)). Live; never hand-overwrite. |
   | `reminders.md` | Your reminders ([Reminders](#remindersmd)). |
+  | `guard.log` | What the cockpit's guard refused the orchestrator (one JSON line each, newest last; shown in Settings → Jeeves → Guard refusals). Written by the cockpit. |
   | `agents/<name>.md` | Your agents, and your versions of built-in ones ([Agents](#agentsnamemd)). |
   | `loop-constraints.md` | Optional: your rule additions, layered on the shipped baseline ([Constraints](#constraints)). |
   | `cockpit.json` | Cockpit models, permission modes, session hygiene and fonts ([Cockpit settings](#cockpitjson)). |
@@ -81,6 +82,7 @@ Every project inherits these. Bold-label fields sit under `##` headings; `review
 | Loop | **overnight** | `HH:MM-HH:MM`, local time. | `22:00-08:00` |
 | Loop | **daily summary** | `on` / `off` — the first tick after **daily summary at** each day paints done-since-yesterday, in flight, and waiting on you. | `on` |
 | Loop | **daily summary at** | `HH:MM`. | `09:00` |
+| Loop | **voice** | How Jeeves talks, e.g. `British, dry`. Brevity and no filler apply whatever it is. | plain, direct |
 | Notifications | **push notifications** | `on` / `off` — master switch for Claude Code push notifications. | `on` |
 | Notifications | **notify reminders** | Push when a reminder falls due. | `on` |
 | Notifications | **notify worker finished** | Push when a dispatched worker's report lands. | `on` |

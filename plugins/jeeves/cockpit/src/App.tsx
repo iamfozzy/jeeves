@@ -634,12 +634,32 @@ const ORCH_DOT: Record<string, string> = {
   idle: 'var(--mantine-color-teal-5)',
   exited: 'var(--mantine-color-gray-6)'
 }
+// The loop is stalled when it hasn't ticked for twice the gap it should keep. The age
+// is re-read every 30 s; a stall raises one browser notification when they're allowed.
+function useStall(ctx: OrchContext | null) {
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => { const t = window.setInterval(() => setNow(Date.now()), 30e3); return () => clearInterval(t) }, [])
+  const last = ctx?.lastTickAt || 0, every = ctx?.tickEveryMs || 300e3
+  const age = last ? now - last : null
+  const stalled = age != null && age > 2 * every && ctx?.status !== 'exited'
+  const told = useRef(0)
+  useEffect(() => {
+    if (!stalled || told.current === last) return
+    told.current = last
+    try { if (Notification.permission === 'granted') new Notification('Jeeves has stopped ticking', { body: `No tick for ${Math.round((age ?? 0) / 60e3)} min — check the orchestrator pane.` }) } catch {}
+  }, [stalled, last, age])
+  return { age, stalled }
+}
+const ago = (ms: number) => (ms < 60e3 ? 'just now' : ms < 3600e3 ? `${Math.round(ms / 60e3)} min ago` : `${Math.round(ms / 3600e3)} h ago`)
+
 function OrchControl({ ctx, onRestart }: { ctx: OrchContext | null; onRestart: () => void }) {
   const pct = ctx?.pct ?? null
   const rotateAt = ctx?.rotateAt ?? 70
-  const hot = pct != null && pct >= rotateAt
-  const color = pct == null ? 'gray' : hot ? 'red' : pct >= rotateAt - 15 ? 'yellow' : 'teal'
+  const { age, stalled } = useStall(ctx)
+  const hot = (pct != null && pct >= rotateAt) || stalled
+  const color = pct == null && !stalled ? 'gray' : hot ? 'red' : pct != null && pct >= rotateAt - 15 ? 'yellow' : 'teal'
   const st = ctx?.status
+  const canNotify = typeof Notification !== 'undefined' && Notification.permission === 'default'
   return (
     <Menu shadow="md" width={248} position="bottom-end" withinPortal>
       <Menu.Target>
@@ -647,7 +667,7 @@ function OrchControl({ ctx, onRestart }: { ctx: OrchContext | null; onRestart: (
           <Badge variant={hot ? 'filled' : 'light'} color={color} size="sm" className="ck-num"
             style={{ cursor: 'pointer', minWidth: 62 }}
             leftSection={<Box w={7} h={7} style={{ borderRadius: '50%', background: st ? (ORCH_DOT[st] || 'var(--mantine-color-gray-6)') : 'transparent' }} />}>
-            ctx {pct == null ? '—' : pct + '%'}
+            {stalled ? 'stalled' : `ctx ${pct == null ? '—' : pct + '%'}`}
           </Badge>
         </UnstyledButton>
       </Menu.Target>
@@ -655,12 +675,16 @@ function OrchControl({ ctx, onRestart }: { ctx: OrchContext | null; onRestart: (
         <Menu.Label>Orchestrator</Menu.Label>
         <Box px="sm" pb={6}>
           <Text size="xs" c="dimmed">Status: {st ?? 'unknown'}</Text>
+          <Text size="xs" c={stalled ? 'red' : 'dimmed'}>
+            Last tick: {age == null ? 'not yet' : ago(age)}{stalled ? ` — expected every ${Math.round((ctx?.tickEveryMs ?? 300e3) / 60e3)} min` : ''}
+          </Text>
           <Text size="xs" c="dimmed">
             {ctx?.pct == null ? 'context — waiting for the session'
               : `${ctx.used.toLocaleString()} / ${ctx.window.toLocaleString()} tokens · rotate at ${rotateAt}%`}
           </Text>
         </Box>
         <Menu.Divider />
+        {canNotify ? <Menu.Item onClick={() => { Notification.requestPermission().catch(() => {}) }}>Notify me if the loop stalls</Menu.Item> : null}
         <Menu.Item leftSection={<IconRefresh size={14} />} color={hot ? 'red' : undefined} onClick={onRestart}>
           Restart orchestrator
         </Menu.Item>

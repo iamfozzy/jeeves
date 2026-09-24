@@ -245,7 +245,12 @@ function broadcast(msg) {
 const hasBrowser = () => { for (const ws of eventClients) if (ws.readyState === 1) return true; return false }
 const pushSurface = () => broadcast({ t: 'surface', payload: bus.surface })
 const pushSpaces = () => broadcast({ t: 'spaces', spaces: workerList() })
-const pushContext = () => broadcast({ t: 'context', ctx: lastContext })
+// The loop's heartbeat: when it last ticked (its per-tick inbox / tick_snapshot call) and
+// how often it should, so the UI can flag a stalled loop.
+let lastTickAt = 0
+const orchCtx = (c = lastContext) => ({ ...c, lastTickAt, tickEveryMs: tickEveryMs() })
+const pushContext = () => broadcast({ t: 'context', ctx: orchCtx() })
+function markTick() { lastTickAt = Date.now(); pushContext() }
 // Lifecycle status of user-opened claude tabs, keyed by their sid (`spaceId:tabId`).
 const sessionStatus = new Map()
 // Child tabs a session opened with open_tab, keyed by tabRef — which is also the
@@ -351,6 +356,19 @@ function parseRegion(rest) {
 // 'text', 'list', or 'paren' (the parenthetical on another field's line — the
 // Jira site after the cloudId). `section` is where a missing field is inserted.
 const F = (key, label, kind = 'text', section = null) => ({ key, label, kind, section })
+// The gap the loop should keep between ticks, from defaults.md (BRIEF Each tick step 6):
+// overnight inside its window, mid-flight while a worker runs, else the normal tick.
+function tickEveryMs() {
+  try {
+    const d = readDefaults(), num = (key, dflt) => { const f = CONFIG_FIELDS.defaults.find((x) => x.key === key); return +(readField(d, f) || dflt) || dflt }
+    const [a, b] = String(readField(d, CONFIG_FIELDS.defaults.find((x) => x.key === 'overnight')) || '22:00-08:00').split('-')
+    const mins = (t) => { const [h, m] = String(t).split(':').map(Number); return h * 60 + (m || 0) }
+    const now = new Date(), t = now.getHours() * 60 + now.getMinutes(), from = mins(a), to = mins(b)
+    const night = from > to ? t >= from || t < to : t >= from && t < to
+    const s = night ? num('tickOvernightSeconds', 1800) : workerList().some((w) => w.status === 'working') ? num('tickMidFlightSeconds', 120) : num('tickSeconds', 300)
+    return s * 1000
+  } catch { return 300e3 }
+}
 const FM = (key, kind = 'text') => ({ key, fm: true, kind })
 const CONFIG_FIELDS = {
   defaults: [
@@ -364,6 +382,7 @@ const CONFIG_FIELDS = {
     F('tickSeconds', 'tick seconds', 'text', 'Loop'), F('tickMidFlightSeconds', 'tick mid-flight seconds', 'text', 'Loop'),
     F('tickOvernightSeconds', 'tick overnight seconds', 'text', 'Loop'), F('overnight', 'overnight', 'text', 'Loop'),
     F('dailySummary', 'daily summary', 'text', 'Loop'), F('dailySummaryAt', 'daily summary at', 'text', 'Loop'),
+    F('voice', 'voice', 'text', 'Loop'),
     F('pushNotifications', 'push notifications', 'text', 'Notifications'), F('notifyReminders', 'notify reminders', 'text', 'Notifications'),
     F('notifyWorkerFinished', 'notify worker finished', 'text', 'Notifications'), F('notifyReviewReady', 'notify review ready', 'text', 'Notifications')
   ],
@@ -655,7 +674,7 @@ async function editReminders({ op, id, what, due, by } = {}) {
     if (end === lines.length - 1) lines.push('')
     out = lines.join('\n')
   } else {
-    const at = lines.findIndex((l) => l.match(REMINDER_ROW)?.[1] === id)
+    const at = typeof id === 'string' ? lines.findIndex((l) => l.match(REMINDER_ROW)?.[1] === id) : -1
     if (at < 0) return { error: 'unknown reminder: ' + id }
     if (op === 'done' || op === 'delete') lines.splice(at, 1)
     else if (op === 'snooze') {
@@ -1531,7 +1550,7 @@ const server = http.createServer(async (req, res) => {
       sessions: { ...counts, claudes, total: sessions.size }
     })
   }
-  if (path === '/api/orch/context') return sendJson(res, readOrchContext())
+  if (path === '/api/orch/context') return sendJson(res, orchCtx(readOrchContext()))
   if (req.method === 'GET' && path === '/api/layout') return sendJson(res, { layout })
   // `from` is the saving browser's id, so it can skip its own echo.
   if (req.method === 'POST' && path === '/api/layout') {
@@ -1582,6 +1601,12 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'DELETE' && path === '/api/work') {
     const out = await closeWork(url.searchParams.get('workId'), { removeWorktree: url.searchParams.get('worktree') === '1', force: url.searchParams.get('force') === '1' })
     return sendJson(res, out, out.error ? 400 : 200)
+  }
+  // The orchestrator guard's refusals (bin/guard-orchestrator.mjs), newest first.
+  if (path === '/api/guard-log') {
+    const rows = readMd(join(NEUTRAL, 'guard.log')).trimEnd().split('\n').filter(Boolean).slice(-100).reverse()
+      .map((l) => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean)
+    return sendJson(res, { rows })
   }
   if (path === '/api/folder') {
     const f = folderFor(url.searchParams.get('path'))
@@ -1901,7 +1926,7 @@ function winSpawnTarget(file, args) {
 function spawnSession(sid, cwd, file, args, kind) {
   ;[file, args] = winSpawnTarget(file, args)
   const term = pty.spawn(file, args, { name: 'xterm-256color', cols: 80, rows: 24, cwd, env: PTY_ENV })
-  const sess = { term, buf: '', clients: new Set(), detachedAt: 0, kind: kind || 'shell' }
+  const sess = { term, buf: '', clients: new Set(), detachedAt: 0, kind: kind || 'shell', seen: new Map() }
   const broadcast = (o) => { const msg = JSON.stringify(o); for (const c of sess.clients) if (c.readyState === 1) { try { c.send(msg) } catch {} } }
   sessions.set(sid, sess)
   if (sessionStatus.get(sid) === 'exited') { sessionStatus.set(sid, 'working'); pushSessionStatus(sid, 'working') } // respawned
@@ -1925,7 +1950,7 @@ function spawnSession(sid, cwd, file, args, kind) {
   return sess
 }
 
-function attach(ws, sid, cwd, kind) {
+function attach(ws, sid, cwd, kind, cid) {
   let sess = sessions.get(sid)
   if (!sess) {
     // The first attach of a tab open_tab created binds it and starts it on its prompt.
@@ -1956,11 +1981,18 @@ function attach(ws, sid, cwd, kind) {
   // same-size resize raises no SIGWINCH, so claude never repaints. On the first
   // resize after attach, narrow a claude pane by one column and restore it: a real
   // width change makes claude clear and redraw the whole frame.
+  // A pane (cid) numbers its input frames and resends unanswered ones on a new
+  // socket, so a frame numbered at or below the last one written is a duplicate.
+  // A ping is answered at once: it tells the pane its socket is alive.
   let redrawn = sess.kind === 'shell' || sess.kind === 'codex'
   ws.on('message', (raw) => {
     let m
     try { m = JSON.parse(raw) } catch { return }
-    if (m.t === 'i') sess.term.write(m.d)
+    if (m.t === 'i') {
+      if (cid && m.n > 0) { if (m.n <= (sess.seen.get(cid) || 0)) return; sess.seen.set(cid, m.n) }
+      sess.term.write(m.d)
+    }
+    else if (m.t === 'ping') { try { ws.send('{"t":"pong"}') } catch {} }
     else if (m.t === 'r' && m.cols > 0 && m.rows > 0) {
       sess.size = { cols: m.cols, rows: m.rows }
       if (!redrawn && m.cols > 1) {
@@ -2530,6 +2562,7 @@ function buildMcpServer(role, caller) {
       + 'Pass full: true after a /compact or whenever you do not hold the last result.',
     inputSchema: { full: z.boolean().optional().describe('Return every PR, not a delta.') }
   }, async ({ full: whole } = {}) => {
+    markTick()
     const { out, snap } = await tickSnapshot(whole ? null : prevTick)
     if (snap) prevTick = snap
     return { content: [{ type: 'text', text: JSON.stringify(out) }], isError: !!out.error }
@@ -2539,6 +2572,7 @@ function buildMcpServer(role, caller) {
     description: 'Drain pending worker reports (returns them and marks them acknowledged). Call once per tick; then post to GitHub yourself and update state.md. Reports are reconciled from the persisted worker records, so one survives a server restart until you drain it.',
     inputSchema: { peek: z.boolean().optional().describe('Return without acknowledging.') }
   }, async ({ peek }) => {
+    markTick()
     // Reconcile from the durable worker records: any that reported and hasn't been
     // acknowledged is still pending, even across a restart. Plus any orphan reports
     // (workers whose record was already gone). Draining marks the records acked.
@@ -2625,7 +2659,7 @@ ptyWss.on('connection', (ws, req) => {
   }
   const scheme = url.searchParams.get('scheme')
   if (scheme === 'light' || scheme === 'dark') uiScheme = scheme
-  attach(ws, sid, cwd, kind)
+  attach(ws, sid, cwd, kind, url.searchParams.get('cid'))
 })
 
 eventsWss.on('connection', (ws, req) => {
@@ -2636,7 +2670,7 @@ eventsWss.on('connection', (ws, req) => {
   try { ws.send(JSON.stringify({ t: 'surface', payload: bus.surface })) } catch {}
   try { ws.send(JSON.stringify({ t: 'spaces', spaces: workerList() })) } catch {}
   try { ws.send(JSON.stringify({ t: 'reminders', ...remindersView() })) } catch {}
-  try { ws.send(JSON.stringify({ t: 'context', ctx: readOrchContext() })) } catch {}
+  try { ws.send(JSON.stringify({ t: 'context', ctx: orchCtx(readOrchContext()) })) } catch {}
   try { ws.send(JSON.stringify({ t: 'sessions', statuses: Object.fromEntries(sessionStatus) })) } catch {}
   ws.on('close', () => eventClients.delete(ws))
 })

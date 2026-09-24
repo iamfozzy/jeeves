@@ -6,6 +6,7 @@ import type { PtyCmd } from './types'
 import { withToken } from './token'
 import { uploadFile } from './api'
 import { fontStack, useAppearance, whenFontLoaded } from './theme'
+import { createPtyLink, type LinkState, type PtyLink, type SocketLike } from './ptyLink'
 
 // Terminal palettes follow the app's colour scheme. Each carries a full 16-colour
 // ANSI palette tuned for its background, so shells and claude's -ansi themes (which
@@ -22,6 +23,20 @@ export const XTERM_THEMES = {
 // Scroll steps sent to a fullscreen claude pane per wheel event.
 const WHEEL_BOOST = 3
 
+// A keydown that lands outside every editable element goes to the active terminal.
+const EDITABLE = 'input, textarea, select, [contenteditable]:not([contenteditable="false"]), .xterm'
+const OVERLAY = '[role="dialog"], [role="menu"], [role="listbox"]'
+const INTERACTIVE = 'button, a[href], summary, [role="button"], [role="tab"], [role="link"], [role="checkbox"], [role="switch"], [role="option"]'
+// The bytes xterm would send for a key, or null for keys left unhandled. Focus
+// moves to the terminal on keydown, too late for xterm to see the event itself.
+function keyBytes(e: KeyboardEvent, appCursor: boolean): string | null {
+  const arrow = { ArrowUp: 'A', ArrowDown: 'B', ArrowRight: 'C', ArrowLeft: 'D' }[e.key]
+  if (arrow) return (appCursor ? '\x1bO' : '\x1b[') + arrow
+  const named: Record<string, string> = { Enter: '\r', Backspace: '\x7f', Tab: '\t', Escape: '\x1b' }
+  if (named[e.key]) return named[e.key]
+  return e.key.length === 1 ? e.key : null
+}
+
 // One PTY over one WebSocket, rendered by xterm. Mounted once per tab and kept
 // alive across tab switches; `active` drives fit + focus when it becomes visible.
 // `onTitle` gets the title the program sets (OSC 0/2) — claude sets its session topic.
@@ -32,7 +47,10 @@ export function TerminalPane({ sid, cwd, cmd, active, onTitle }: { sid: string; 
   const termRef = useRef<Terminal | null>(null)
   const onTitleRef = useRef(onTitle)
   onTitleRef.current = onTitle
-  const wsRef = useRef<WebSocket | null>(null)
+  const linkRef = useRef<PtyLink | null>(null)
+  const [link, setLink] = useState<{ state: LinkState; code?: number }>({ state: 'connecting' })
+  const activeRef = useRef(active)
+  activeRef.current = active
   const dragDepth = useRef(0) // enter/leave counter — a bare currentTarget check leaves the overlay stuck over child nodes
   const [dragOver, setDragOver] = useState(false)
   const scheme = useComputedColorScheme('dark')
@@ -76,10 +94,15 @@ export function TerminalPane({ sid, cwd, cmd, active, onTitle }: { sid: string; 
       })
     }
 
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    const qs = `sid=${encodeURIComponent(sid)}&cmd=${cmd}&cwd=${encodeURIComponent(cwd)}&scheme=${schemeRef.current}`
-    const url = withToken(`${proto}://${location.host}/pty?${qs}`)
-    const send = (o: unknown) => { const ws = wsRef.current; if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)) }
+    // The URL is built per connect, so a reconnect carries a rotated token and the
+    // current scheme. `cid` names this pane to the server, which drops input frames
+    // it has already written when the link resends them.
+    const cid = Math.random().toString(36).slice(2)
+    const url = () => {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+      const qs = `sid=${encodeURIComponent(sid)}&cmd=${cmd}&cwd=${encodeURIComponent(cwd)}&scheme=${schemeRef.current}&cid=${cid}`
+      return withToken(`${proto}://${location.host}/pty?${qs}`)
+    }
 
     // Fit is deferred, never synchronous. xterm's cell metrics
     // aren't ready on the same tick as open(), and the flex layout may not have
@@ -90,58 +113,58 @@ export function TerminalPane({ sid, cwd, cmd, active, onTitle }: { sid: string; 
     const refit = () => {
       if (!el || el.offsetWidth <= 0 || el.offsetHeight <= 0) return
       try { fit.fit() } catch {}
-      send({ t: 'r', cols: term.cols, rows: term.rows })
+      linkRef.current?.control({ t: 'r', cols: term.cols, rows: term.rows })
     }
     refitRef.current = refit
+
+    // The link (ptyLink.ts) keeps one live socket, queues and resends input across
+    // reconnects, and reports its state to the badge. On every open after the first,
+    // the server replays its buffer (or starts a new session), so reset first to
+    // avoid a doubled screen.
+    const link = createPtyLink({
+      url,
+      socket: (u) => new WebSocket(u) as unknown as SocketLike,
+      now: () => Date.now(),
+      setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+      clearTimeout: (id) => window.clearTimeout(id),
+      onOpen: (fresh) => { if (!fresh) term.reset(); refit(); if (activeRef.current) term.focus() },
+      onOutput: (d) => term.write(d),
+      onExit: (code) => term.write(`\r\n[session ended: ${code}]\r\n`),
+      onState: (state, code) => setLink({ state, code })
+    })
+    linkRef.current = link
+    link.start()
 
     const raf = requestAnimationFrame(() => { refit(); requestAnimationFrame(refit) })
     const timers = [window.setTimeout(refit, 150), window.setTimeout(refit, 450)]
 
-    // A dropped socket (server restart, laptop sleep, network blip) reconnects with
-    // backoff. Left dead, the pane would keep showing its last frame while the
-    // server reaps the detached session. On reconnect the server replays its
-    // buffer (or respawns and resumes the session), so reset first to avoid a
-    // doubled screen. A session that exited on its own is not respawned.
-    // A socket that dies without closing never fires onclose, so the server sends a
-    // heartbeat every 15 s and a socket silent for STALE_MS is dropped and replaced.
-    let disposed = false, ended = false, retry = 0, retryTimer = 0, lastSeen = Date.now()
-    const STALE_MS = 40000
-    const connect = () => {
-      const ws = new WebSocket(url)
-      wsRef.current = ws
-      lastSeen = Date.now()
-      ws.onopen = () => {
-        if (retry) term.reset()
-        retry = 0
-        refit()
-        if (active) term.focus()
-      }
-      ws.onmessage = (e) => {
-        lastSeen = Date.now()
-        const m = JSON.parse(e.data as string)
-        if (m.t === 'o') term.write(m.d)
-        else if (m.t === 'exit') { ended = true; term.write(`\r\n[session ended: ${m.code}]\r\n`) }
-      }
-      ws.onclose = () => {
-        if (disposed || ended) return
-        if (!retry) term.write('\r\n[cockpit: disconnected — reconnecting…]\r\n')
-        retryTimer = window.setTimeout(connect, Math.min(1000 * 2 ** retry++, 15000))
-      }
-    }
-    connect()
-    const checkStale = () => {
-      const ws = wsRef.current
-      if (disposed || ended || !ws || ws.readyState !== 1 || Date.now() - lastSeen < STALE_MS) return
-      ws.onclose = null; ws.close()
-      term.write('\r\n[cockpit: connection went quiet — reconnecting…]\r\n')
-      retry = 1
-      connect()
-    }
-    const staleTimer = window.setInterval(checkStale, 5000)
-    // Timers are throttled in a background tab, so check the moment it's visible again.
-    const onVisible = () => { if (document.visibilityState === 'visible') checkStale() }
+    const checkTimer = window.setInterval(() => link.check(), 5000)
+    // Timers are throttled in a background tab and stop across sleep, so check (and
+    // ping) the moment the tab is visible or the network is back.
+    const onVisible = () => { if (document.visibilityState === 'visible') link.check(true) }
+    const onOnline = () => link.check(true)
     document.addEventListener('visibilitychange', onVisible)
-    const dataSub = term.onData((d) => send({ t: 'i', d }))
+    window.addEventListener('online', onOnline)
+    const dataSub = term.onData((d) => link.input(d))
+
+    // A key pressed while focus sits outside any editable element (after a click on
+    // a dashboard button, say) goes to the active, visible terminal. Printable keys,
+    // Enter, Backspace, Tab, Escape and arrows are forwarded; other keys only move
+    // focus. On a button or link, Enter, Space and Tab keep their native meaning.
+    // Chords are left alone: App.tsx owns ⌘P/Ctrl+P, and the browser owns the rest.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.isComposing || e.metaKey || e.ctrlKey) return
+      if (!activeRef.current || !el.offsetWidth || !el.offsetHeight) return
+      const t = e.target instanceof Element ? e.target : null
+      if (t?.closest(EDITABLE) || document.querySelector(OVERLAY)) return
+      if (t?.closest(INTERACTIVE) && (e.key === 'Enter' || e.key === ' ' || e.key === 'Tab')) return
+      if (['Shift', 'Alt', 'Control', 'Meta', 'CapsLock', 'Dead', 'Unidentified'].includes(e.key)) return
+      e.preventDefault()
+      term.focus()
+      const bytes = keyBytes(e, term.modes.applicationCursorKeysMode)
+      if (bytes) term.input(bytes, true)
+    }
+    window.addEventListener('keydown', onKey)
     const titleSub = term.onTitleChange((t) => onTitleRef.current?.(t))
 
     const ro = new ResizeObserver(refit)
@@ -150,10 +173,11 @@ export function TerminalPane({ sid, cwd, cmd, active, onTitle }: { sid: string; 
     return () => {
       cancelAnimationFrame(raf)
       timers.forEach((t) => clearTimeout(t))
-      disposed = true
-      clearTimeout(retryTimer); clearInterval(staleTimer)
+      clearInterval(checkTimer)
       document.removeEventListener('visibilitychange', onVisible)
-      ro.disconnect(); dataSub.dispose(); titleSub.dispose(); wsRef.current?.close(); term.dispose()
+      window.removeEventListener('online', onOnline)
+      window.removeEventListener('keydown', onKey)
+      ro.disconnect(); dataSub.dispose(); titleSub.dispose(); link.dispose(); term.dispose()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -163,8 +187,7 @@ export function TerminalPane({ sid, cwd, cmd, active, onTitle }: { sid: string; 
   useEffect(() => {
     const t = termRef.current
     if (t) t.options.theme = XTERM_THEMES[scheme]
-    const ws = wsRef.current
-    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'scheme', v: scheme }))
+    linkRef.current?.control({ t: 'scheme', v: scheme })
   }, [scheme])
 
   // Follow cockpit.json's terminal font live. The pane opens in the fallback stack
@@ -209,10 +232,8 @@ export function TerminalPane({ sid, cwd, cmd, active, onTitle }: { sid: string; 
     if (!files.length) return
     const results = await Promise.all(files.map((f) => uploadFile(cwd, f).catch(() => ({} as { path?: string }))))
     const paths = results.map((r) => r.path).filter((p): p is string => !!p)
-    const ws = wsRef.current
-    if (ws && ws.readyState === 1 && paths.length) {
-      const text = paths.map((p) => (/\s/.test(p) ? `'${p}'` : p)).join(' ') + ' '
-      ws.send(JSON.stringify({ t: 'i', d: text }))
+    if (paths.length) {
+      linkRef.current?.input(paths.map((p) => (/\s/.test(p) ? `'${p}'` : p)).join(' ') + ' ')
       termRef.current?.focus()
     }
   }
@@ -227,6 +248,17 @@ export function TerminalPane({ sid, cwd, cmd, active, onTitle }: { sid: string; 
       style={{ position: 'relative', height: '100%', width: '100%', background: XTERM_THEMES[scheme].background, padding: '10px 12px', boxSizing: 'border-box' }}
     >
       <div ref={ref} style={{ height: '100%', width: '100%' }} />
+      {(link.state === 'reconnecting' || link.state === 'ended') && (
+        <div style={{
+          position: 'absolute', top: 8, right: 10, zIndex: 4, pointerEvents: 'none',
+          padding: '3px 9px', borderRadius: 6, border: '1px solid var(--ck-border)',
+          background: 'var(--ck-surface)', boxShadow: '0 1px 3px rgba(0,0,0,.18)',
+          font: '500 12px var(--mantine-font-family)',
+          color: link.state === 'ended' ? 'var(--mantine-color-dimmed)' : 'var(--ck-yellow)'
+        }}>
+          {link.state === 'ended' ? `session ended${link.code ? ` (${link.code})` : ''} — press any key to restart` : 'reconnecting…'}
+        </div>
+      )}
       {dragOver && (
         <div style={{
           position: 'absolute', inset: 8, borderRadius: 8, pointerEvents: 'none',

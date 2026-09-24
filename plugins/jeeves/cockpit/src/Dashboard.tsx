@@ -35,9 +35,9 @@ const PHASE: Record<StoryPhase, { color: string; label: string }> = {
 }
 
 // reminders.md due times are local "YYYY-MM-DD HH:MM".
-const dueAt = (s: string) => { const m = s.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/); return m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]).getTime() : NaN }
+export const dueAt = (s: string) => { const m = s.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/); return m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]).getTime() : NaN }
 // "overdue 20m" / "due today 15:00" / "due tomorrow 10:00" / "due Fri 25 Sep 10:00".
-function whenDue(s: string, ms: number) {
+export function whenDue(s: string, ms: number) {
   const at = new Date(dueAt(s))
   if (isNaN(ms)) return 'due ' + s
   if (ms <= 0) { const m = Math.round(-ms / 60e3); return 'overdue ' + (m < 60 ? `${m}m` : m < 1440 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`) }
@@ -423,7 +423,7 @@ function Actions({ actions, repo, ghNum, sent, fire }: {
 // Turn ABC-1234 into a Jira link and #123 into a GitHub PR link, in place. A bare #123
 // is a PR in the row's repo; `api#123` or `acme/api#123` is one in that repo, so
 // a ticket spanning repos links each PR to its own.
-function Linked({ text, repo, repos }: { text: string; repo?: RepoCfg; repos: RepoCfg[] }) {
+export function Linked({ text, repo, repos }: { text: string; repo?: RepoCfg; repos: RepoCfg[] }) {
   const key = repo?.jiraKey && repo.jiraBase ? repo.jiraKey : null
   const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const pattern = [key ? `${esc(key)}-\\d+` : '', '(?:[\\w.-]+/)?[\\w.-]+#\\d+', '#\\d+'].filter(Boolean).join('|')

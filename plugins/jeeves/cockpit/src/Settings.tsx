@@ -7,7 +7,7 @@ import {
   IconAdjustments, IconAlertTriangle, IconArrowBackUp, IconCheck, IconChevronRight, IconCopy, IconDeviceFloppy,
   IconFolderCog, IconKey, IconPencil, IconPlus, IconRobot, IconSearch, IconStack2, IconTrash, IconTypography, IconWand, IconX
 } from '@tabler/icons-react'
-import { editAgent, editReminder, getAgents, getConfigView, getReminders, getSettings, saveConfig, saveSettings, sendOrchInput } from './api'
+import { editAgent, editReminder, getAgents, getConfigView, getGuardLog, getReminders, getSettings, saveConfig, saveSettings, sendOrchInput, type GuardRow } from './api'
 import { setToken } from './token'
 import { FONT_NAME, fontStack, previewFont, type FontKind } from './theme'
 import type {
@@ -773,6 +773,7 @@ function JeevesTab({ view, write }: { view: ConfigView; write: Write }) {
         specs={NOTIFY} />
       <RemindersSection />
       <ConstraintsSection s={s} onSaved={setS} />
+      <GuardSection />
       <CockpitInfo s={s} onSaved={setS} />
     </Stack>
   )
@@ -842,7 +843,8 @@ const CADENCE: LoopSpec[] = [
   { key: 'tickOvernightSeconds', label: 'Overnight tick (seconds)', dflt: '1800', hint: 'Inside the overnight window.' },
   { key: 'overnight', label: 'Overnight window', dflt: '22:00-08:00', hint: 'HH:MM-HH:MM, local time.' },
   { key: 'dailySummary', label: 'Daily summary', dflt: 'on', choices: ON_OFF, hint: 'Done since yesterday, in flight, waiting on you.' },
-  { key: 'dailySummaryAt', label: 'Daily summary at', dflt: '09:00', dependsOn: 'dailySummary', hint: 'The first tick after this time, once a day.' }
+  { key: 'dailySummaryAt', label: 'Daily summary at', dflt: '09:00', dependsOn: 'dailySummary', hint: 'The first tick after this time, once a day.' },
+  { key: 'voice', label: 'Voice', dflt: 'plain, direct', hint: 'How Jeeves talks, e.g. "British, dry". Brevity and no filler apply whatever you pick.' }
 ]
 const NOTIFY: LoopSpec[] = [
   { key: 'pushNotifications', label: 'Push notifications', dflt: 'on', choices: ON_OFF, hint: 'Off silences every kind below.' },
@@ -873,6 +875,34 @@ function LoopForm({ title, description, specs, view, write }: { title: string; d
 
 // reminders.md, shared with the loop (it re-reads the file every tick).
 const dueDate = (due: string) => new Date(due.replace(' ', 'T'))
+// What the orchestrator's guard refused (guard.log), newest first: a refusal it genuinely
+// needed is a case for widening bin/guard-orchestrator.mjs's allowlist.
+function GuardSection() {
+  const [rows, setRows] = useState<GuardRow[] | null>(null)
+  const load = () => { getGuardLog().then((r) => setRows(r.rows)).catch(() => setRows([])) }
+  useEffect(load, [])
+  const when = (at: string) => new Date(at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  return (
+    <Section title="Guard refusals" description="What the orchestrator tried and was stopped from doing itself — it should have dispatched it. One it genuinely needed means the allowlist should grow."
+      right={<Button size="compact-xs" variant="subtle" color="gray" onClick={load}>Refresh</Button>}>
+      {rows === null ? <Text size="sm" c="dimmed">Loading…</Text> : !rows.length ? <Text size="sm" c="dimmed">Nothing refused yet.</Text> : (
+        <Stack gap={8}>
+          {rows.slice(0, 30).map((r, i) => (
+            <Box key={i}>
+              <Group gap={8} wrap="nowrap">
+                <Badge size="xs" variant="light" color="gray" style={{ flex: 'none' }}>{r.tool}</Badge>
+                <Text size="xs" ff="monospace" truncate style={{ minWidth: 0 }}>{r.what}</Text>
+                <Text size="xs" c="dimmed" ml="auto" style={{ flex: 'none' }}>{when(r.at)}</Text>
+              </Group>
+              <Text size="xs" c="dimmed" lh={1.4}>{r.why}</Text>
+            </Box>
+          ))}
+        </Stack>
+      )}
+    </Section>
+  )
+}
+
 function RemindersSection() {
   const [rows, setRows] = useState<Reminder[] | null>(null)
   const [err, setErr] = useState<string | null>(null)

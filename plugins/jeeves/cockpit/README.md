@@ -52,12 +52,24 @@ PTY and keeps it running, with 256 KB of scrollback to replay on reattach. A det
 ended after `detachMinutes` (`cockpit.json`); the orchestrator (`orch:main`) and workers
 (`work:<id>`) never are. On reattach the server replays the buffer and, for claude panes, narrows
 the PTY by one column and restores it, forcing claude to redraw a clean frame. The browser
-reconnects a dropped socket with backoff (1 s doubling to 15 s) and resets the pane first.
+reconnects a dropped socket with backoff (1 s doubling to 5 s, or at once on a keypress) and
+resets the pane first; a corner badge shows "reconnecting…" meanwhile.
 Any number of panes can attach to one session (another browser tab, a phone): all of them get
 the output, and input and resizes from any of them reach the PTY. The server pings every socket
 and sends a `hb` frame every 15 s. A socket that misses a pong is terminated, and a pane that
 hears nothing for 40 s drops its socket and reconnects, so a connection that dies silently
 recovers instead of freezing on its last frame.
+
+No keystroke is dropped on the way (`src/ptyLink.ts`). Input typed with no open socket is queued
+(up to 64 KB) and sent on the next open. Input on an open socket is followed by a `{t:'ping'}`,
+which the server answers with `{t:'pong'}`; if no frame of any kind arrives within 3 s the socket
+is treated as dead, replaced at once, and the unanswered input resent. Input frames carry a
+per-pane `cid` (in the URL) and sequence number `n`, and the server skips a frame it has already
+written, so a resend never types twice. A socket stuck connecting for 10 s is replaced. The pane
+re-checks on becoming visible and on `online`, pinging an idle socket. After the session exits
+the badge reads "session ended — press any key to restart", and the next key (not sent) reattaches,
+which spawns a fresh session (claude tabs resume their conversation). A key pressed while focus
+is outside any editable element, with no modal or menu open, goes to the active terminal.
 
 Every claude the cockpit launches gets per-session `--settings` (added to the user's own):
 lifecycle hooks (`SessionStart`, `UserPromptSubmit`, `Notification`, `Stop`, `SessionEnd`) that run
