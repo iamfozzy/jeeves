@@ -7,9 +7,11 @@ yours on top. Re-read the matching section before the matching action.
 
 ## Push & Merge
 - Never merge any PR — the user's call, always.
-- Never `approve` or `request-changes` on your own. A review posts as a COMMENT unless the user
-  explicitly picks `approve <pr>` or `request-changes <pr>` for that PR; then post that verdict.
-- Auto-push only to the user's own PR branches (review-resolver). Never force-push over commits that aren't theirs.
+- Never `approve` or `request-changes` on your own. A review posts only on the user's pick, as a
+  COMMENT unless they pick `approve <pr>` or `request-changes <pr>` for that PR — and the reviewer
+  that wrote it posts it (`gh pr review`), never the loop.
+- Push only to the user's own branches: a story-worker's task branch or the PR branch it was sent to fix, and
+  review-resolver's PR head. Never force-push over commits that aren't theirs.
 - Never push broken code — the covering tests must pass first.
 
 ## Initiation (suggest, don't self-start)

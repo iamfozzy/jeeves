@@ -19,8 +19,9 @@ If `<data-home>/identity.md` is missing, setup hasn't run — say so once and po
 `/jeeves:setup`, then run in generic mode with whatever you can (their gh `@me`).
 
 ## Constraints — load first, obey always
-Before anything else, load the binding safety rules and keep them in force every tick; every
-worker you dispatch inherits them:
+Before anything else, load the binding safety rules and keep them in force every tick. They bind
+every worker too: under the cockpit, `dispatch` appends both layers to each worker's system prompt;
+headless, paste them into every Task prompt yourself.
 - **Baseline** — always read `${CLAUDE_PLUGIN_ROOT}/loop-constraints.md`. Shipped, always applies,
   updates with the plugin.
 - **Local additions** — then read `<data-home>/loop-constraints.md` if it exists: the user's extra
@@ -405,23 +406,14 @@ No code starts from a ticket. It starts from a plan the user has **approved**. T
    is the signal (the config's **plan trigger** status). **Don't plan on your own** — surface it
    under NEEDS YOU as *needs a plan* with the launcher `plan <TICKET>`, and wait; its `needs-plan`
    ledger row stops it re-flagging. Steps 2–5 run only once they type it.
-2. **Plan.** Create a **planning workspace**. If `mcp__cockpit__dispatch` is available (*Running
-   under the cockpit*), call `dispatch({ agent: "planner", repo, ticket, prompt })` so planning runs
-   as a real session **inside the repo** — inheriting its `CLAUDE.md`, `.claude/` skills and
-   conventions, which an in-process sub-agent does not. Embed the ticket you've already read
-   (summary, description, acceptance criteria, comments) and this planning brief in `prompt`, since
-   the worker has the repo checkout but not your Jira access; it researches the affected code and
-   **reports** the substance back via `report`, and the loop publishes it (step 3). Without the
-   cockpit, dispatch the planning agent (opus) in-repo via the Task tool (`isolation: worktree`).
-   The substance — problem, approach, files/areas touched, real trade-offs, test plan, open questions
-   — and **how the affected system works today** in full (behaviour, data flow, components, real
-   files and entry points), enough for a reader new to the area. It also returns a **work
-   breakdown**: the work split into the smallest sensible **stories/subtasks**, each with a short id (`S1`, `S2`…), its own goal, acceptance criteria,
-   and files/areas. For each story it names its **dependencies** — which stories must land first —
-   so the set forms a DAG: mark the ones with no unmet deps as **independent** (parallelisable) and
-   the rest as **blocked-on `<id>`**. The agent gives a suggested order and calls out which stories
-   can run at the same time. Keep stories genuinely separable — if two can't be built or reviewed
-   apart, they're one story.
+2. **Plan.** Dispatch the **`planner`** agent: under the cockpit
+   `dispatch({ agent: "planner", repo, ticket, prompt })`, so planning runs as a real session
+   **inside the repo** with its `CLAUDE.md` and `.claude/` conventions; headless, the Task tool
+   (`subagent_type: "jeeves:planner"`, `isolation: worktree`, in the project's repo dir). The
+   planner carries its own role and report shape; `prompt` carries only the ticket you've already
+   read — summary, description, acceptance criteria, comments — since it has the repo but not your
+   Jira access. It reports the plan (how the system works today, the fix, a story breakdown as a
+   DAG, decisions, test plan, open questions), and the loop publishes it (step 3).
 3. **Publish as a Confluence page.** The *loop* authors the plan as a **Confluence page** in the
    configured space (config → *Confluence*), not a claude.ai Artifact. Plain English for a
    human PM — no jargon, no "I analysed", no hedging. Title `<TICKET> — Plan: <short summary>`;
@@ -469,6 +461,9 @@ You do **not** write code, edit files, run builds, or push — ever. Every piece
 distributed to a subagent. You do only what a subagent structurally can't: read Jira/GitHub,
 author plan pages, post/resolve GitHub threads and Jira comments, decide dispatch order, and
 report. If you catch yourself about to edit a repo, stop and dispatch a `story-worker` instead.
+You run no skills but `loop` and Jeeves's own (`/jeeves:*`): any other skill can be specific to a
+repo, so it runs in a worker dispatched there — the review command in the `reviewer`, and the
+posting in the reviewer that wrote the review.
 
 **Looking into something is work too.** Yourself, you run only: the tick's GitHub and Jira queries
 and other metadata calls (`gh pr view --json`, `gh pr checks`, `getJiraIssue`), the `git fetch` /
@@ -491,14 +486,15 @@ covers plan stories, reviews, resolves, verification, the user's own agents, and
 | Merge conflicts or a red build on an existing PR branch | `story-worker`, on that `branch`, told to push to it and not open a PR |
 | Look into something — a failing check, a review thread, a bug, "why is X" | `investigator` |
 | Check a worker's pushed result | `loop-verifier` |
-| Review a teammate's PR / plan a ticket | `reviewer` / `planner` (labels; the prompt carries the role) |
+| Plan a ticket (on `plan <TICKET>`) | `planner` |
+| Review a teammate's PR (on `review <pr>`) | `reviewer` |
 | Whatever one of the user's agents describes | that agent's name |
 
 Never use the Agent/Task tool for this while `dispatch` is available. A Task subagent runs inside
 this session: no worktree or space the user can watch, no `report()`, no dashboard row, and it dies
 with the session. Headless, Task is the fallback — and even then run the plugin's agent
 (`subagent_type: "jeeves:story-worker"`, `"jeeves:investigator"`, `"jeeves:review-resolver"`,
-`"jeeves:loop-verifier"`), never a general-purpose one.
+`"jeeves:loop-verifier"`, `"jeeves:planner"`, `"jeeves:reviewer"`), never a general-purpose one.
 
 **Pick the model per dispatch** (*Rules*, model match): leave `model` off for code, reviews,
 verification and diagnosis — they run on the worker Opus. Pass `model: "sonnet"` for mechanical
@@ -561,30 +557,33 @@ it opens no plan, review, or resolve that you didn't ask for.
     substantive — `git -C <path> fetch origin <base>` then `git -C <path> log --no-merges
     <review-oid>..<head> ^origin/<base>`; base-sync merges alone don't count. Either way record a
     `review` row with `sha=<head>` so the same commits aren't re-checked.
-  On `review <pr>`, dispatch a **reviewer** the same cockpit-or-Task way as any worker:
+  On `review <pr>`, dispatch the **`reviewer`** agent the same cockpit-or-Task way as any worker:
   `dispatch({ agent: "reviewer", repo, branch: <pr head branch>, ticket: "<pr>", prompt })`, where
-  `prompt` embeds the policy — an existing review (the author's own, or theirs with responses) is
-  **vetted** (read the diff + review/responses, return APPROVE / UNAPPROVE + confidence % + deciding
-  factors); none → run the project's **review command** (default `/code-review <pr>`) in the repo
-  checkout. Its final output *is* the report: the reviewer's prompt must tell it to wait for the
-  command to finish, then `report()` that output verbatim (no re-ranking, no additions).
+  `prompt` gives the PR number, its base, and whether a review already exists (the author's own, or
+  theirs with responses). The cockpit appends the project's review command itself. The reviewer
+  vets an existing review (APPROVE / UNAPPROVE + confidence + deciding factors) or runs the review
+  command and reports its final report verbatim, running in the repo checkout it needs.
 - **Posting a review is theirs to trigger.** When a reviewer's compiled report lands, **do not post
   it.** Push it (*Rules*, `notify review ready`), show it to the user and update that PR's row in
   the **Reviews** section with the three disposition actions — `comment <pr>` (plain comment, the
-  default), `approve <pr>`, `request-changes <pr>`. On their pick, the **loop** posts the report
-  with `gh pr review <pr> --repo <owner/name> --comment | --approve | --request-changes --body-file
-  <report>`: the review body is the reviewer's, the verdict and the decision to post are always
-  theirs. Without the cockpit, run the review inline (vet subagent, or the review command in the
-  main loop) behind the same comment/approve/request-changes gate.
+  default), `approve <pr>`, `request-changes <pr>`. On their pick, **send it to the reviewer that
+  wrote the review** (`SendMessage`: `post <pr> as <pick>`); it posts with `gh pr review` from
+  its own session, where the review, the repo and the diff are, and reports the posted URL. The loop
+  itself never posts a review. That reviewer gone (`ListAgents`) → dispatch a fresh
+  `reviewer` on the same branch with the report verbatim and the pick in `prompt`; it posts without
+  re-reviewing. Once it's posted (or the user drops the review), close its workspace:
+  `close_work({ workId, removeWorktree: true })`. Without the cockpit, vet through a Task
+  `jeeves:reviewer`, but run a fresh review command in the main loop; on the pick, post through a Task `jeeves:reviewer` given the report and the pick —
+  both behind the same comment/approve/request-changes gate.
 - **A review landed on the user's own PR** → when changes are requested (not for plain comments),
   surface it under NEEDS YOU with `resolve <pr>` — **don't dispatch on your own**. On `resolve <pr>`,
   dispatch `review-resolver` the same cockpit-or-Task way as any worker (*Running under the
-  cockpit*): it addresses the actionable feedback, pushes to the PR branch, and reports a map of
+  cockpit*), with `branch: <pr head branch>` and the PR number in `prompt`: it addresses the actionable feedback, pushes to the PR branch, and reports a map of
   `thread-id → "fixed in <sha>"` (+ which to leave open and why) — via `report()` under the
   cockpit, or as its Task return otherwise. Subagents can't write to GitHub — so the **loop** posts
   the replies and resolves those threads via `gh api graphql`, once CI is green and
   `loop-verifier` has approved the fixes. Same pattern for any subagent that needs a GitHub write: agent decides,
-  loop posts. Park anything ambiguous.
+  loop posts — except a reviewer posting its own review on the user's pick (above). Park anything ambiguous.
 
 ## Custom agents
 The user's own agents are `<data-home>/agents/<name>.md` (the Step 0 roster), in the built-ins'
@@ -624,7 +623,8 @@ the plugin's built-in.
   work is done and why `report()` hasn't landed, and relay the answer. A nudge, not a demand — never
   tell a worker to abandon a legitimate wait (e.g. watching CI).
 - **Verify what leaves the repo.** After a worker pushes or opens a PR, hand its result to
-  `loop-verifier` — dispatched the same cockpit-or-Task way (*Running under the cockpit*) — before
+  `loop-verifier` — dispatched the same cockpit-or-Task way (*Running under the cockpit*), with the
+  PR, its base, and the story's acceptance criteria or the review threads it answered — before
   telling the user it's done, and relay its pass/fail. It never fixes; on a reject, park it and
   tell them. No PR is reported done or ready to test before its verdict is relayed.
 - **Park on failure.** A worker that reports blocked/failed → park it under NEEDS YOU (an `ask`

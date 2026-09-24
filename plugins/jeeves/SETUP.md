@@ -181,7 +181,7 @@ You audit one PR for security mistakes…
 
 | Field | Meaning | Unset → |
 |---|---|---|
-| `name` | The file name without `.md`: lowercase letters, digits and `-`, starting with a letter (2–41 characters). `planner`, `reviewer` and `worker` are taken by the loop. | required |
+| `name` | The file name without `.md`: lowercase letters, digits and `-`, starting with a letter (2–41 characters). `worker` is taken by the loop; a built-in's name customises that built-in. | required |
 | `description` | One line: when to use it. The loop matches items against it. | required |
 | `tools` | Comma list from `Bash`, `Read`, `Edit`, `Write`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, `NotebookEdit`, `Task`. | every tool |
 | `model` | `inherit`, `claude-opus-5-5`, `claude-sonnet-5`, `claude-haiku-4-5`, `claude-fable-5-1` or `claude-opus-5`. | `inherit` — the worker model from `cockpit.json` |

@@ -46,6 +46,9 @@ let TOKEN = (() => {
   return t
 })()
 const SESSION_TOKEN = randomBytes(24).toString('hex')
+// Authorises only POST /api/usage: it rides in every launched session's environment
+// (the status line relay reads it), so it grants nothing else.
+const USAGE_TOKEN = randomBytes(24).toString('hex')
 const cockpitUrl = () => `http://localhost:${PORT}/?token=${TOKEN}`
 function tokenOk(provided) {
   if (!provided) return false
@@ -83,6 +86,8 @@ const COCKPIT_SPEC = {
   orchPermission: { env: 'JEEVES_ORCH_PERMISSION', dflt: 'auto', choices: PERMISSION_MODES },
   workerPermission: { env: 'JEEVES_WORKER_PERMISSION', dflt: 'auto', choices: PERMISSION_MODES },
   rotatePct: { env: 'JEEVES_ORCH_ROTATE_PCT', dflt: 70, range: [1, 100] },   // Restart button lights at/above this
+  claudeTui: { dflt: 'fullscreen', choices: ['fullscreen', 'default'] },      // Claude Code's renderer (its `tui` setting) in every session launched here
+  scrollSpeed: { dflt: 3, range: [1, 20] },                                   // CLAUDE_CODE_SCROLL_SPEED: fullscreen lines per wheel step (the cockpit isn't detected as xterm.js, so Claude's own default is 1)
   compactPct: { env: 'JEEVES_ORCH_COMPACT_PCT', dflt: 40, range: [0, 100] }, // auto-/compact an idle orchestrator at/above this; 0 = never
   detachMinutes: { dflt: 30, range: [0, 10080] },                           // reap a detached user tab after this; 0 = never
   uiFont: { env: 'JEEVES_UI_FONT', dflt: 'Roboto', font: true },       // a Google Font family, or `system`
@@ -248,7 +253,9 @@ const pushSpaces = () => broadcast({ t: 'spaces', spaces: workerList() })
 // The loop's heartbeat: when it last ticked (its per-tick inbox / tick_snapshot call) and
 // how often it should, so the UI can flag a stalled loop.
 let lastTickAt = 0
-const orchCtx = (c = lastContext) => ({ ...c, lastTickAt, tickEveryMs: tickEveryMs() })
+// The account's 5-hour and 7-day rate limits, from the status line relay (POST /api/usage).
+let usage = null
+const orchCtx = (c = lastContext) => ({ ...c, lastTickAt, tickEveryMs: tickEveryMs(), usage })
 const pushContext = () => broadcast({ t: 'context', ctx: orchCtx() })
 function markTick() { lastTickAt = Date.now(); pushContext() }
 // Lifecycle status of user-opened claude tabs, keyed by their sid (`spaceId:tabId`).
@@ -548,7 +555,7 @@ function parseLedger(md) {
 }
 
 // Everything the Settings modal shows: defaults and identity values, and per
-// project the effective config with where each value comes from, plus its ledger.
+// project the effective config with where each value comes from.
 function configView() {
   const dmd = readDefaults(), imd = readMd(IDENTITY_FILE)
   const values = (md, fields) => Object.fromEntries(fields.map((f) => [f.key, readField(md, f)]))
@@ -562,8 +569,7 @@ function configView() {
       id: r.id, slug: r.slug,
       repo: { value: r.slug, source: readField(md, REPO_F) ? 'project' : 'default' },
       path: { value: r.path, source: readField(md, PATH_F) ? 'project' : 'default' },
-      fields, otherOverrides,
-      state: parseLedger(readMd(join(NEUTRAL, 'projects', r.id, 'state.md')))
+      fields, otherOverrides
     }
   })
   return {
@@ -711,8 +717,10 @@ const AGENTS_DIR = join(NEUTRAL, 'agents')
 const AGENT_NAME = /^[a-z][a-z0-9-]{1,40}$/
 const AGENT_TOOLS = ['Bash', 'Read', 'Edit', 'Write', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Task']
 const AGENT_MODELS = ['inherit', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-haiku-4-5', 'claude-fable-5-1', 'claude-opus-5']
-// Labels the loop dispatches under with the role in the prompt (BRIEF), so no agent may take them.
-const DISPATCH_LABELS = ['planner', 'reviewer', 'worker']
+// The label a dispatch with no agent runs under, so no agent may take it.
+const DISPATCH_LABELS = ['worker']
+// What a reviewer runs when neither the project nor defaults.md sets reviewCommand.
+const DEFAULT_REVIEW_COMMAND = '/code-review'
 const shortHash = (s) => createHash('sha256').update(s).digest('hex').slice(0, 12)
 function readAgent(dir, name) {
   const md = readMd(join(dir, name + '.md'))
@@ -1530,6 +1538,16 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── API (token-gated; static assets below stay open so the page can boot) ──
+  // The account's rate limits, reported by the status line relay of any session the
+  // cockpit launched (bin/statusline.mjs --relay). The latest report wins.
+  if (req.method === 'POST' && path === '/api/usage') {
+    const t = Buffer.from(String(url.searchParams.get('token') || '')), k = Buffer.from(USAGE_TOKEN)
+    if (t.length !== k.length || !timingSafeEqual(t, k)) return sendJson(res, { error: 'unauthorized' }, 401)
+    const b = await readBody(req), lim = (x) => (x && Number.isFinite(+x.used_percentage) ? { used: +x.used_percentage, resetsAt: Number.isFinite(+x.resets_at) ? +x.resets_at * 1000 : null } : null)
+    const next = { fiveHour: lim(b.rate_limits?.five_hour), sevenDay: lim(b.rate_limits?.seven_day), at: Date.now() }
+    if (next.fiveHour || next.sevenDay) { const moved = JSON.stringify([next.fiveHour, next.sevenDay]) !== JSON.stringify([usage?.fiveHour, usage?.sevenDay]); usage = next; if (moved) pushContext() }
+    return sendJson(res, { ok: true })
+  }
   if (path.startsWith('/api/')) {
     if (!authed(req, url)) return sendJson(res, { error: 'unauthorized' }, 401)
   }
@@ -1601,6 +1619,27 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'DELETE' && path === '/api/work') {
     const out = await closeWork(url.searchParams.get('workId'), { removeWorktree: url.searchParams.get('worktree') === '1', force: url.searchParams.get('force') === '1' })
     return sendJson(res, out, out.error ? 400 : 200)
+  }
+  // Install the cockpit's status line (bin/statusline.mjs) as the user's Claude Code status
+  // line: copy it to ~/.claude/jeeves-statusline.mjs and point settings.json's statusLine at
+  // it, backing settings.json up first. A different status line already set is only
+  // replaced when the request says so.
+  if (path === '/api/statusline') {
+    const dir = join(os.homedir(), '.claude'), file = join(dir, 'settings.json'), target = join(dir, 'jeeves-statusline.mjs')
+    let cfgJson = {}
+    try { cfgJson = JSON.parse(readFileSync(file, 'utf8')) } catch (e) { if (existsSync(file)) return sendJson(res, { error: 'could not read ~/.claude/settings.json: ' + e.message }, 500) }
+    const current = cfgJson.statusLine?.command ?? null, ours = !!current && /jeeves-statusline\.mjs/.test(current)
+    if (req.method !== 'POST') return sendJson(res, { current, installed: ours })
+    const body = await readBody(req)
+    if (current && !ours && !body.replace) return sendJson(res, { current, installed: false, needsConfirm: true })
+    try {
+      mkdirSync(dir, { recursive: true })
+      copyFileSync(STATUSLINE_SCRIPT, target)
+      if (existsSync(file)) copyFileSync(file, `${file}.bak-jeeves-${Date.now()}`)
+      cfgJson.statusLine = { type: 'command', command: `node "${target}"`, padding: 1, refreshInterval: 30 }
+      writeFileSync(file, JSON.stringify(cfgJson, null, 2) + '\n')
+    } catch (e) { return sendJson(res, { error: 'install failed: ' + e.message }, 500) }
+    return sendJson(res, { current: cfgJson.statusLine.command, installed: true })
   }
   // The orchestrator guard's refusals (bin/guard-orchestrator.mjs), newest first.
   if (path === '/api/guard-log') {
@@ -1793,6 +1832,7 @@ const MAX_UPLOAD = 25 * 1024 * 1024 // cap dropped-file size
 // own hooks — it never replaces them.
 const HOOK_SCRIPT = join(__dirname, 'bin', 'hook.mjs')
 const GUARD_SCRIPT = join(__dirname, 'bin', 'guard-orchestrator.mjs')
+const STATUSLINE_SCRIPT = join(__dirname, 'bin', 'statusline.mjs')
 // The browser's colour scheme (sent on every pane connect and on toggle). Claude
 // sessions launched from here get the matching variant of the user's theme, so
 // dark-ansi becomes light-ansi in a light UI, dark ↔ light, and so on.
@@ -1813,7 +1853,9 @@ function sessionSettings(id) {
   // A Node helper (not curl + POSIX redirection) so hooks fire the same on macOS,
   // Linux and Windows. process.execPath is the running node binary.
   const post = (status) => ({ hooks: [{ type: 'command', command: `"${process.execPath}" "${HOOK_SCRIPT}" "${id}" "${status}" "${url}"` }] })
-  return JSON.stringify({ theme: claudeTheme(), hooks: {
+  // The status line relays the rate limits to the cockpit, then shows the user's own
+  // status line (bin/statusline.mjs --relay), so the terminal looks as it always does.
+  return JSON.stringify({ theme: claudeTheme(), tui: cfg('claudeTui'), statusLine: { type: 'command', command: `"${process.execPath}" "${STATUSLINE_SCRIPT}" --relay`, padding: 1, refreshInterval: 30 }, hooks: {
     SessionStart: [post('working')],
     UserPromptSubmit: [post('working')],
     Notification: [post('awaiting')],
@@ -1821,8 +1863,8 @@ function sessionSettings(id) {
     SessionEnd: [post('offline')],
     // The orchestrator dispatches work and never does it (bin/guard-orchestrator.mjs):
     // no edits outside its data home, ledgers only through write_state, reads of its
-    // own files only, an allowlisted Bash, and no Agent/Task.
-    ...(id === 'orch:main' ? { PreToolUse: [{ matcher: 'Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|Bash|Agent|Task', hooks: [{ type: 'command', command: `"${process.execPath}" "${GUARD_SCRIPT}" "${NEUTRAL}" "${join(__dirname, '..')}"` }] }] } : {})
+    // own files only, an allowlisted Bash, no Agent/Task, and no skills but loop and jeeves:*.
+    ...(id === 'orch:main' ? { PreToolUse: [{ matcher: 'Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|Bash|Agent|Task|Skill', hooks: [{ type: 'command', command: `"${process.execPath}" "${GUARD_SCRIPT}" "${NEUTRAL}" "${join(__dirname, '..')}"` }] }] } : {})
   } })
 }
 
@@ -1840,10 +1882,22 @@ function applyHookStatus(cur, next) {
   return next                                           // idle | awaiting on a live session
 }
 
+// The loop's binding rules as a worker sees them: the shipped baseline, then the
+// user's additions on top (a direct conflict goes to the addition). Read per call, so an
+// edit reaches the next dispatch or resume.
+function workerConstraints() {
+  const base = readMd(join(__dirname, '..', 'loop-constraints.md')).trim()
+  const local = readMd(join(NEUTRAL, 'loop-constraints.md')).trim()
+  if (!base && !local) return ''
+  return '\n\nThe loop constraints below bind you as much as the loop. Parts about the loop\'s own job (ticks, surfacing, budget, output) don\'t apply to you; the rest does.\n\n'
+    + (base || '') + (local ? '\n\n## Local additions (win on a direct conflict)\n\n' + local : '')
+}
+
 // The system-prompt appendix every dispatched worker carries — how to report
-// back over the bus. Shared by the initial dispatch and a post-restart resume.
+// back over the bus, and the loop constraints. Shared by the initial dispatch and a
+// post-restart resume.
 function workerPreamble(workId) {
-  return `You are a Jeeves worker running inside the cockpit, in an isolated git worktree. Your workId is "${workId}". You cannot post to GitHub on the loop's behalf; open your own PR only. When the task is complete or you are blocked, report in THREE steps, IN THIS ORDER: (1) ALWAYS FIRST write your FULL result to a file "JEEVES_REPORT.md" at the ROOT of your worktree — a fenced JSON block with { workId: "${workId}", status: "done"|"blocked"|"error", summary, pr, verdict, threads } followed by the substance in prose. Write this EVERY time, not only on failure: it is the durable record the loop falls back to, and it survives a cockpit restart when nothing else does. (2) Call the MCP tool "report" (server "cockpit") with { workId: "${workId}", status, summary, pr, verdict, threads }. If it errors (e.g. cockpit MCP down / ConnectionRefused), retry it at most ONCE — do not thrash; JEEVES_REPORT.md from step 1 already covers you. (3) Send ONE cross-session message to the session named "${ORCH_NAME}" (SendMessage, to: "${ORCH_NAME}") carrying the FULL result (not just a one-liner), so it can act immediately even if the report call was refused. Do not resend it in a loop — one message, then finish. The orchestrator sees your work through the report, the message, or JEEVES_REPORT.md — never through printed terminal text.`
+  return `You are a Jeeves worker running inside the cockpit, in an isolated git worktree. Your workId is "${workId}". You never post to GitHub on the loop's behalf — open your own PR only — unless your agent instructions say when. When the task is complete or you are blocked, report in THREE steps, IN THIS ORDER: (1) ALWAYS FIRST write your FULL result to a file "JEEVES_REPORT.md" at the ROOT of your worktree — a fenced JSON block with { workId: "${workId}", status: "done"|"blocked"|"error", summary, pr, verdict, threads } followed by the substance in prose. Write this EVERY time, not only on failure: it is the durable record the loop falls back to, and it survives a cockpit restart when nothing else does. (2) Call the MCP tool "report" (server "cockpit") with { workId: "${workId}", status, summary, pr, verdict, threads }. If it errors (e.g. cockpit MCP down / ConnectionRefused), retry it at most ONCE — do not thrash; JEEVES_REPORT.md from step 1 already covers you. (3) Send ONE cross-session message to the session named "${ORCH_NAME}" (SendMessage, to: "${ORCH_NAME}") carrying the FULL result (not just a one-liner), so it can act immediately even if the report call was refused. Do not resend it in a loop — one message, then finish. The orchestrator sees your work through the report, the message, or JEEVES_REPORT.md — never through printed terminal text.` + workerConstraints()
 }
 
 // The orchestrator is a real `claude` booting the Jeeves loop, wired to this
@@ -1892,7 +1946,7 @@ function fileArgsFor(kind, sid, cwd, prompt) {
 // /etc/zshrc_Apple_Terminal and print "Restored session:" into every new shell.
 // These panes are xterm.js, not Apple Terminal, so strip that machinery.
 const PTY_ENV = (() => {
-  const e = { ...process.env, TERM_PROGRAM: 'jeeves-cockpit', SHELL_SESSIONS_DISABLE: '1' }
+  const e = { ...process.env, TERM_PROGRAM: 'jeeves-cockpit', SHELL_SESSIONS_DISABLE: '1', JEEVES_USAGE_URL: `http://${HOST}:${PORT}/api/usage?token=${USAGE_TOKEN}` }
   delete e.TERM_SESSION_ID
   return e
 })()
@@ -1925,7 +1979,7 @@ function winSpawnTarget(file, args) {
 
 function spawnSession(sid, cwd, file, args, kind) {
   ;[file, args] = winSpawnTarget(file, args)
-  const term = pty.spawn(file, args, { name: 'xterm-256color', cols: 80, rows: 24, cwd, env: PTY_ENV })
+  const term = pty.spawn(file, args, { name: 'xterm-256color', cols: 80, rows: 24, cwd, env: { ...PTY_ENV, CLAUDE_CODE_SCROLL_SPEED: String(cfg('scrollSpeed')) } })
   const sess = { term, buf: '', clients: new Set(), detachedAt: 0, kind: kind || 'shell', seen: new Map() }
   const broadcast = (o) => { const msg = JSON.stringify(o); for (const c of sess.clients) if (c.readyState === 1) { try { c.send(msg) } catch {} } }
   sessions.set(sid, sess)
@@ -2039,6 +2093,8 @@ async function dispatch({ agent, repo, ticket, branch, prompt, model }) {
   const sessionId = randomUUID() // persisted, so the worker resumes after a server restart
   const def = findAgent(agent)
   const wmodel = workerModelFor(def, model)
+  // A reviewer runs the project's review command, whatever the loop's prompt says.
+  if (def?.name === 'reviewer') prompt = `${String(prompt || '').trim()}\n\nReview command for this project: ${r.reviewCommand || DEFAULT_REVIEW_COMMAND}`.trim()
   const args = ['--session-id', sessionId, '--mcp-config', mcpConfig('worker', sid), '--model', wmodel, '--permission-mode', cfg('workerPermission'), '--settings', sessionSettings(workId), ...(def ? agentArgs(def) : []), '--append-system-prompt', workerPreamble(workId), String(prompt || 'Begin your assigned task.')]
   try { spawnSession(sid, wt.path, 'claude', args, 'worker') }
   catch (err) {
@@ -2259,7 +2315,7 @@ function buildMcpServer(role, caller) {
     description: 'Dispatch a unit of work to a separate worker session (a new cockpit space) in a fresh worktree. Returns a workId. The worker reports back via the "report" tool; drain results with "inbox". Use this — never the Agent/Task tool — for every agent run while the cockpit is up, ad-hoc asks included.\n'
       + 'When `agent` names one of these agents, the session runs as it (its prompt, tools and model) — the prompt carries only the task:\n'
       + roster + '\n'
-      + 'Any other `agent` (e.g. planner, reviewer) is a label: compose the full prompt yourself (role + task).',
+      + 'Any other `agent` is a label: compose the full prompt yourself (role + task).',
     inputSchema: {
       agent: z.string().describe('An agent name from the list above, or a label for the worker.'),
       repo: z.string().describe('Repo id or slug the work belongs to.'),
@@ -2280,7 +2336,7 @@ function buildMcpServer(role, caller) {
       status: z.enum(['done', 'blocked', 'error', 'working']).optional(),
       summary: z.string(),
       pr: z.string().optional(),
-      verdict: z.string().optional().describe('For a verifier: APPROVE / REJECT / ESCALATE_HUMAN.'),
+      verdict: z.string().optional().describe('For a verifier: APPROVE / REJECT / ESCALATE_HUMAN. For a reviewer vetting a review: APPROVE / UNAPPROVE.'),
       threads: z.string().optional().describe('For a resolver: thread-id → disposition map, as text.')
     }
   }, async (rp) => {
@@ -2304,7 +2360,7 @@ function buildMcpServer(role, caller) {
   })
 
   if (full) srv.registerTool('close_work', {
-    description: 'Close a finished worker: end its session and optionally remove its worktree. Close a planner workspace once you have captured/published its plan (removeWorktree: true — planners are scratch). Close a story-worker workspace once its PR has merged (removeWorktree: true — removing the worktree leaves the merged branch/PR intact).',
+    description: 'Close a finished worker: end its session and optionally remove its worktree. Close a planner workspace once you have captured/published its plan (removeWorktree: true — planners are scratch). Close a story-worker workspace once its PR has merged (removeWorktree: true — removing the worktree leaves the merged branch/PR intact). Close a reviewer workspace once it has posted its review or the user dropped it (removeWorktree: true).',
     inputSchema: {
       workId: z.string(),
       removeWorktree: z.boolean().optional().describe('Delete the git worktree too.'),

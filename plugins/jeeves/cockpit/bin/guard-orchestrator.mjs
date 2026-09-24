@@ -10,6 +10,8 @@
 //  - Bash runs only an allowlist: GitHub/Jira metadata and the PR writes the loop
 //    posts, the review policy's git fetch/log, and reads of its own files.
 //  - Agent/Task is refused: every agent run goes through the cockpit's dispatch.
+//  - Skill runs only `loop` and Jeeves's own `jeeves:*`: any other skill can be repo
+//    specific, so it runs in a worker dispatched into that repo.
 // Exit 2 refuses the call and hands the reason to the session. Input it can't read
 // exits 0; a Bash command it can't parse is refused, since Bash is an allowlist.
 import { appendFileSync, existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
@@ -215,6 +217,11 @@ function allowed(cmd, args) {
 
 // Runs last, once the allowlists above exist.
 function main() {
+  if (tool === 'Skill') {
+    const name = String(ti.skill || '').replace(/^\//, '')
+    if (name === 'loop' || name.startsWith('jeeves:')) process.exit(0)
+    block(`Blocked: the orchestrator runs no skills but \`loop\` and Jeeves's own — ${name || 'this one'} can be repo specific, so it belongs to a worker in that repo (a review command to the reviewer, posting a review to the reviewer that wrote it). ${DISPATCH}`)
+  }
   if (tool === 'Agent' || tool === 'Task') block(`Blocked: under the cockpit, agents run through mcp__cockpit__dispatch, never the ${tool} tool — a subagent here has no worktree, no report() and no dashboard row. ${DISPATCH}`)
 
   if (tool === 'Read' || tool === 'Grep' || tool === 'Glob') {

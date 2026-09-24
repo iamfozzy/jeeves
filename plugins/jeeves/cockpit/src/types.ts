@@ -12,8 +12,6 @@ export type RepoCfg = {
 // defaults.md, or unset in both. `default` is what it inherits.
 export type Source = 'project' | 'default' | 'unset'
 export type Eff<T> = { value: T | null; source: Source; default?: T | null }
-export type LedgerRow = { kind: string; id: string; state: string; next: string; since: string | null; extra: Record<string, string> }
-export type ProjectState = { ledger: true; rows: LedgerRow[] } | { ledger: false; raw: string }
 export type ProjectFields = {
   baseBranch: Eff<string>; jiraKey: Eff<string>; reviewScope: Eff<string>
   reviewCommand: Eff<string>; seedFiles: Eff<string[]>
@@ -23,7 +21,6 @@ export type ProjectView = {
   repo: Eff<string>; path: Eff<string>
   fields: ProjectFields
   otherOverrides: string[] // defaults.md labels this project.md replaces that the form doesn't edit
-  state: ProjectState
 }
 export type DefaultsValues = {
   cloudId: string | null; jiraSite: string | null; planTrigger: string | null; qaAssigneeField: string | null
@@ -42,7 +39,7 @@ export type ConfigView = {
   projects: ProjectView[]
 }
 // ── Settings: cockpit.json + the cockpit's address (GET/POST /api/settings) ──
-export type CockpitKey = 'orchModel' | 'orchEffort' | 'workerModel' | 'orchPermission' | 'workerPermission' | 'rotatePct' | 'compactPct' | 'detachMinutes'
+export type CockpitKey = 'orchModel' | 'orchEffort' | 'workerModel' | 'orchPermission' | 'workerPermission' | 'rotatePct' | 'compactPct' | 'detachMinutes' | 'claudeTui' | 'scrollSpeed'
   | 'uiFont' | 'monoFont' | 'terminalFontSize'
 export type CockpitView = {
   values: Record<CockpitKey, string | number>
@@ -195,4 +192,7 @@ export type OrchContext = {
   updatedAt: number
   lastTickAt?: number  // when the loop last ticked (0 = not since the server started)
   tickEveryMs?: number // the gap it should keep right now (normal, mid-flight or overnight)
+  // The account's rate limits, as a launched session's status line last reported them.
+  usage?: { fiveHour: RateLimit | null; sevenDay: RateLimit | null; at: number } | null
 }
+export type RateLimit = { used: number; resetsAt: number | null } // used: percent; resetsAt: epoch ms

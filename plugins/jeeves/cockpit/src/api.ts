@@ -19,6 +19,14 @@ export async function saveLayout(layout: Layout, from: string): Promise<void> {
 }
 
 // A folder space's directory: a typed path (~ expanded) resolved and checked by the server.
+// The user's Claude Code status line, and installing the cockpit's.
+export type StatusLineView = { current: string | null; installed: boolean; needsConfirm?: boolean; error?: string }
+export function getStatusLine(): Promise<StatusLineView> { return getJson('/api/statusline') }
+export async function installStatusLine(replace = false): Promise<StatusLineView> {
+  const r = await fetch('/api/statusline', { method: 'POST', headers: authHeaders({ 'content-type': 'application/json' }), body: JSON.stringify({ replace }) })
+  return r.json()
+}
+
 // The orchestrator guard's refusals, newest first.
 export type GuardRow = { at: string; tool: string; what: string; why: string }
 export function getGuardLog(): Promise<{ rows: GuardRow[] }> {
@@ -163,7 +171,7 @@ export async function editAgent(op: AgentOp): Promise<AgentsView | { error: stri
   return r.json()
 }
 
-// defaults.md, identity.md and every project's effective config + ledger.
+// defaults.md, identity.md and every project's effective config.
 export function getConfigView(): Promise<ConfigView> {
   return getJson('/api/settings/config')
 }

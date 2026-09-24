@@ -112,7 +112,7 @@ row's ⋮ menu. Nothing runs until you ask.
 | `approve <TICKET>` / `approve <TICKET> S1, S3` | Approves the plan (or only those stories) — Jeeves dispatches one worker per story, in parallel where dependencies allow. |
 | `change <TICKET>: …` | Revises the plan. Comments on the ticket work too. |
 | `review <pr>` | Runs a review of a teammate's PR (your review command, default `/code-review`). |
-| `comment <pr>` / `approve <pr>` / `request-changes <pr>` | Posts the finished review with that verdict. Nothing posts until you pick one. |
+| `comment <pr>` / `approve <pr>` / `request-changes <pr>` | The reviewer that wrote the review posts it with that verdict, via `gh pr review`. Nothing posts until you pick one. |
 | `resolve <pr>` | Addresses the change requests on your own PR, pushes, and resolves the threads it fixed. |
 | `qa <KEY>` | Prints the ticket's testing instructions and opens it in the browser. Read-only. |
 | `run <agent> on <ticket \| #pr \| repo>` | Dispatches one of your agents (Settings → Agents) on that target, as a worker in its own worktree. Cockpit only. Jeeves may suggest one when an item matches the agent's description. |
@@ -128,8 +128,8 @@ Jeeves never merges, never posts a review until you pick its verdict, and never 
 - **Sidebar** — **Jeeves** (the orchestrator and dashboard), **Scratchpad** (terminals rooted at
   your home directory), then **Spaces** grouped by repo and **Agents** (dispatched workers). A repo appears
   only while it has an open space or worker, or you've pinned it; pinned repos come first, then
-  the ones needing attention. Each space row shows its branch and worktree folder, an amber dot
-  for uncommitted changes, and ↑/↓ commit counts against its upstream.
+  the ones needing attention. Each space row shows its branch, with the count of uncommitted files
+  on the right; its **?** card has the worktree folder and ahead/behind against its upstream.
 - **Open a space** — the repo row's **+**, or **+** on the Spaces header to pick a repo. Choose an
   existing or new branch, an open PR, or an existing worktree. A new branch is cut from the
   project's freshly fetched base branch, and the project's seed files (e.g. `.env`) are copied in.
@@ -166,7 +166,7 @@ The header's ⚙ opens five tabs. Field-by-field reference: [`SETUP.md`](SETUP.m
   tracking for it. **Add repos…** runs `/jeeves:setup --scan` in the orchestrator.
 - **Defaults** — your identity, and the shared defaults every project inherits: Jira, Confluence,
   GitHub review scope and base branches, review command and seed files.
-- **Agents** — the built-in agents (story worker, investigator, review resolver, verifier), each expandable to its
+- **Agents** — the built-in agents (planner, story worker, reviewer, review resolver, investigator, verifier), each expandable to its
   model, tools and prompt; **Customise** one to run your own version in cockpit dispatches, **Reset
   to built-in** to drop it. A customised agent is flagged when a plugin update changes the
   built-in, with the new built-in beside yours to compare. Below, **Your agents**: **New agent**,

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ActionIcon, AppShell, Badge, Box, Burger, Button, Group, Menu, Modal, ScrollArea, Stack, Text, Tooltip, UnstyledButton, useComputedColorScheme, useMantineColorScheme } from '@mantine/core'
+import { ActionIcon, AppShell, Badge, Box, Burger, Button, Group, Menu, Modal, Progress, ScrollArea, Stack, Text, Tooltip, UnstyledButton, useComputedColorScheme, useMantineColorScheme } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
 import { IconEye, IconMoon, IconRefresh, IconSettings, IconSun } from '@tabler/icons-react'
 import { Sidebar, spaceDot, WORKER_DOT } from './Sidebar'
@@ -650,6 +650,23 @@ function useStall(ctx: OrchContext | null) {
   }, [stalled, last, age])
   return { age, stalled }
 }
+// One usage bar: label and percent over a bar coloured by how close it is to the limit,
+// with the time until it resets.
+function UsageBar({ label, pct, resetsAt }: { label: string; pct: number | null; resetsAt?: number | null }) {
+  const left = resetsAt ? resetsAt - Date.now() : null
+  const until = left && left > 0 ? (left >= 864e5 ? `${Math.floor(left / 864e5)}d ${Math.floor((left % 864e5) / 36e5)}h` : `${Math.floor(left / 36e5)}h ${String(Math.floor((left % 36e5) / 6e4)).padStart(2, '0')}m`) : null
+  const color = pct == null ? 'gray' : pct >= 90 ? 'red' : pct >= 70 ? 'yellow' : 'teal'
+  return (
+    <Box>
+      <Group justify="space-between" gap={6} mb={3}>
+        <Text size="xs" fw={600}>{label}</Text>
+        <Text size="xs" c="dimmed" className="ck-num">{pct == null ? '—' : `${Math.round(pct)}%`}{until ? ` · resets in ${until}` : ''}</Text>
+      </Group>
+      <Progress value={pct ?? 0} color={color} size="sm" radius="xl" />
+    </Box>
+  )
+}
+
 const ago = (ms: number) => (ms < 60e3 ? 'just now' : ms < 3600e3 ? `${Math.round(ms / 60e3)} min ago` : `${Math.round(ms / 3600e3)} h ago`)
 
 function OrchControl({ ctx, onRestart }: { ctx: OrchContext | null; onRestart: () => void }) {
@@ -661,7 +678,7 @@ function OrchControl({ ctx, onRestart }: { ctx: OrchContext | null; onRestart: (
   const st = ctx?.status
   const canNotify = typeof Notification !== 'undefined' && Notification.permission === 'default'
   return (
-    <Menu shadow="md" width={248} position="bottom-end" withinPortal>
+    <Menu shadow="md" width={280} position="bottom-end" withinPortal>
       <Menu.Target>
         <UnstyledButton aria-label="Orchestrator context and restart">
           <Badge variant={hot ? 'filled' : 'light'} color={color} size="sm" className="ck-num"
@@ -683,6 +700,14 @@ function OrchControl({ ctx, onRestart }: { ctx: OrchContext | null; onRestart: (
               : `${ctx.used.toLocaleString()} / ${ctx.window.toLocaleString()} tokens · rotate at ${rotateAt}%`}
           </Text>
         </Box>
+        <Menu.Divider />
+        <Menu.Label>Usage</Menu.Label>
+        <Stack gap={10} px="sm" pb={8}>
+          <UsageBar label="Context" pct={pct} />
+          <UsageBar label="5-hour limit" pct={ctx?.usage?.fiveHour?.used ?? null} resetsAt={ctx?.usage?.fiveHour?.resetsAt} />
+          <UsageBar label="Weekly limit" pct={ctx?.usage?.sevenDay?.used ?? null} resetsAt={ctx?.usage?.sevenDay?.resetsAt} />
+          {!ctx?.usage ? <Text size="xs" c="dimmed">Limits appear once a Claude session started here reports them (its status line refreshes every 30 s).</Text> : null}
+        </Stack>
         <Menu.Divider />
         {canNotify ? <Menu.Item onClick={() => { Notification.requestPermission().catch(() => {}) }}>Notify me if the loop stalls</Menu.Item> : null}
         <Menu.Item leftSection={<IconRefresh size={14} />} color={hot ? 'red' : undefined} onClick={onRestart}>

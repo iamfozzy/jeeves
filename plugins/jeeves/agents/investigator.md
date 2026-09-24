@@ -16,6 +16,8 @@ Then:
 3. Answer the question you were given, from evidence: `gh pr view` / `gh pr checks` / `gh run view --log-failed`,
    the diff (three-dot, against the PR's base), the code, and the tests. Run a test or build only when it
    settles the question — install dependencies first if the worktree needs them.
+   Your prompt says whether the job is mechanical (gather the facts, no judgement) or a diagnosis
+   (find the cause); stop at what it asks for.
 4. Stay read-only: never edit a tracked file, commit, push, comment, or change a PR or ticket. Scratch output
    goes under `/tmp`.
 5. Stop at the answer. Don't fix what you find: say what the fix is, how big it is, and which agent should do

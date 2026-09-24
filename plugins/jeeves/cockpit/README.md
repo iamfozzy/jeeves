@@ -232,9 +232,10 @@ default, so `project.md` only ever holds real overrides.
   count), the `ctx` badge (teal → yellow within 15 points of the threshold → red at it; click for
   usage and Restart), the light/dark toggle, and Settings.
 - **Sidebar** (`Sidebar.tsx`) — Jeeves and Scratchpad; Spaces grouped by repo (only repos with an
-  open space or worker, or pinned; pinned first, then by urgency, then slug), each row showing branch,
-  worktree folder, an uncommitted-changes dot and ↑/↓ against the upstream (a branch tracking its
-  base rather than its own remote shows "↓n base" and "not on origin"); Agents (dispatched workers). Git
+  open space or worker, or pinned; pinned first, then by urgency, then slug), each row showing branch
+  and, on the right, the uncommitted-file count; its details card has the worktree folder and
+  ahead/behind against the upstream (a branch tracking its base rather than its own remote reads
+  "not on origin" / "branch not pushed"); Agents (dispatched workers). Git
   state polls every 5 s. The bottom pill polls `/api/health`: claude session count and the memory of
   the server plus every process it spawned (macOS: physical footprint from `top`; Linux: summed RSS;
   Windows: summed working set from `Win32_Process`), cached 4 s (Windows: 15 s).

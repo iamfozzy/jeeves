@@ -81,6 +81,11 @@ body { background: var(--ck-page); }
 /* Settings' vertical tabs: the active tab is a soft highlight, not the accent fill. */
 .mantine-Tabs-tab.ck-stab { color: var(--mantine-color-text); font-size: var(--mantine-font-size-sm); }
 .mantine-Tabs-tab.ck-stab[data-active] { background: var(--ck-active); color: var(--mantine-color-text); font-weight: 600; }
+/* Unsaved-changes dot on a Settings sub-tab. */
+.ck-dirty { width: 7px; height: 7px; border-radius: 50%; background: var(--mantine-color-orange-5); }
+/* Group headings in the Settings tab list; the first sits flush with the top. */
+.ck-sgroup { padding: 14px 12px 4px; }
+.ck-sgroup:first-child { padding-top: 4px; }
 .ck-row { transition: background .1s ease; }
 /* Type scale: 11px uppercase labels · 12px secondary · 13px code/terminal · 14px primary. */
 .ck-label { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--mantine-color-dimmed); line-height: 1.3; }
@@ -195,5 +200,6 @@ body { background: var(--ck-page); }
     border-bottom: 1px solid var(--ck-border);
   }
   .ck-settings .mantine-Tabs-tab { flex: none; }
+  .ck-settings .ck-sgroup { display: none; }
   .ck-settings .mantine-Tabs-panel { min-height: 0; }
 }

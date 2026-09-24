@@ -20,8 +20,6 @@ export const XTERM_THEMES = {
     brightBlack: '#57606a', brightRed: '#a40e26', brightGreen: '#1a7f37', brightYellow: '#633c01', brightBlue: '#218bff', brightMagenta: '#a475f9', brightCyan: '#3192aa', brightWhite: '#8c959f'
   }
 }
-// Scroll steps sent to a fullscreen claude pane per wheel event.
-const WHEEL_BOOST = 3
 
 // A keydown that lands outside every editable element goes to the active terminal.
 const EDITABLE = 'input, textarea, select, [contenteditable]:not([contenteditable="false"]), .xterm'
@@ -78,21 +76,6 @@ export function TerminalPane({ sid, cwd, cmd, active, onTitle }: { sid: string; 
     term.loadAddon(fit)
     term.open(el)
     termRef.current = term
-
-    // In fullscreen (the alternate screen), claude owns scrolling and xterm hands
-    // it one scroll step per wheel event however far the wheel moved, so a notch
-    // barely moves the view. Re-dispatch each wheel event WHEEL_BOOST times in all,
-    // letting xterm encode every copy for whatever mouse mode claude has set.
-    if (claudePane) {
-      let replaying = false
-      term.attachCustomWheelEventHandler((ev) => {
-        if (replaying || term.buffer.active.type !== 'alternate' || !term.element) return true
-        replaying = true
-        try { for (let i = 1; i < WHEEL_BOOST; i++) term.element.dispatchEvent(new WheelEvent('wheel', ev)) }
-        finally { replaying = false }
-        return true
-      })
-    }
 
     // The URL is built per connect, so a reconnect carries a rotated token and the
     // current scheme. `cid` names this pane to the server, which drops input frames

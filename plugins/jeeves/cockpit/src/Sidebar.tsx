@@ -38,29 +38,20 @@ function repoBand(spaces: Space[], workers: WorkerSpace[], ss: Record<string, st
   return Math.min(2, ...ranks)
 }
 
-// Git state for a space row: `dirty` shows the changed-file pill after the name,
-// `sync` is the muted ↑/↓ text at the row's end (each term only when nonzero), and
-// `tooltip` spells everything out in full. Clean + in sync → null.
-function gitState(git: GitInfo): { dirty: boolean; sync: string; tooltip: string } | null {
-  const parts: string[] = []
+// Git state for a space row: `dirty` shows the changed-file pill at the row's end, and
+// `tooltip` spells everything out, ahead/behind included. Clean + in sync → null.
+function gitState(git: GitInfo): { dirty: boolean; tooltip: string } | null {
   const tips: string[] = []
   if (git.changed > 0) tips.push(`${git.changed} uncommitted file${git.changed === 1 ? '' : 's'}`)
   // ahead/behind are against the tracked ref. When that isn't the branch's own remote
   // (a branch cut from origin/qa and never pushed tracks origin/qa), behind means the
   // base moved on — nothing to pull — and nothing of this branch is on origin yet.
   const own = !git.upstream || !git.branch || git.upstream.endsWith('/' + git.branch)
-  const base = git.upstream ? git.upstream.replace(/^[^/]+\//, '') : ''
   const n = (k: number, w: string) => `${k} ${w}${k === 1 ? '' : 's'}`
-  if (git.ahead > 0) {
-    parts.push(`↑${git.ahead}`)
-    tips.push(own ? `${n(git.ahead, 'commit')} to push` : `${n(git.ahead, 'commit')} not on origin`)
-  }
-  if (git.behind > 0) {
-    parts.push(own ? `↓${git.behind}` : `↓${git.behind} ${base}`)
-    tips.push(own ? `${n(git.behind, 'commit')} to pull` : `${n(git.behind, 'new commit')} on ${git.upstream}`)
-  }
-  if (!own && parts.length) tips.push('branch not pushed')
-  return tips.length ? { dirty: git.changed > 0, sync: parts.join(' '), tooltip: tips.join(' · ') } : null
+  if (git.ahead > 0) tips.push(own ? `${n(git.ahead, 'commit')} to push` : `${n(git.ahead, 'commit')} not on origin`)
+  if (git.behind > 0) tips.push(own ? `${n(git.behind, 'commit')} to pull` : `${n(git.behind, 'new commit')} on ${git.upstream}`)
+  if (!own && (git.ahead > 0 || git.behind > 0)) tips.push('branch not pushed')
+  return tips.length ? { dirty: git.changed > 0, tooltip: tips.join(' · ') } : null
 }
 
 // A labelled field in a sidebar detail card.
@@ -233,7 +224,8 @@ export function Sidebar({
     const title = (git?.git && git.branch) || s.name
     const state = git?.git ? gitState(git) : null
     const tabKinds = s.tabs.map((t) => t.kind).join(', ')
-    // One line: status dot · branch · uncommitted-file count · ↑/↓; the rest behind the ? button.
+    // One line: status dot · branch, then the uncommitted-file count on the right; the rest
+    // (ahead/behind included) behind the ? button.
     return (
       <UnstyledButton
         key={s.id}
@@ -253,9 +245,8 @@ export function Sidebar({
             />
           </Box>
           <Text size="sm" fw={600} lh={1.25} truncate style={{ minWidth: 0 }}>{title}</Text>
-          {state?.dirty && git ? <ChangedPill n={git.changed} /> : null}
           <Box style={{ flex: 1 }} />
-          {state?.sync ? <Text size="xs" c="dimmed" className="ck-num" style={{ flex: 'none' }}>{state.sync}</Text> : null}
+          {state?.dirty && git ? <ChangedPill n={git.changed} /> : null}
           <Group gap={6} wrap="nowrap" style={{ flex: 'none' }}>
           <DetailsButton label="Space details">
             <Box>

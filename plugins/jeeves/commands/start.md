@@ -40,8 +40,9 @@ then continue in generic mode with whatever's available.
 project (still watching the others). Otherwise foreground the one matching the cwd, or nothing on a
 bare launch from a general standpoint. Jeeves always watches the whole configured set either way.
 
-Reviews need a git-repo cwd for the review command (default `/code-review`). If this isn't a git
-repo, say so once and run the rest.
+Reviews run the review command (default `/code-review`). Under the cockpit they run in a dispatched
+`reviewer`; headless, a fresh review runs here, so this session must sit in a git repo. If it isn't,
+say so once and run the rest.
 
 **Session model:** this command runs on the session's model. Under the cockpit that's the
 orchestrator model and effort in Settings → Jeeves (Sonnet at medium by default: a tick is mostly

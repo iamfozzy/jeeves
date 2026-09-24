@@ -51,6 +51,12 @@ const cases = [
   // Agent / Task
   ['Agent', 'Agent', { prompt: 'do it' }, BLOCK, 'dispatch'],
   ['Task', 'Task', { prompt: 'do it' }, BLOCK, 'dispatch'],
+  // Skill
+  ['Skill loop', 'Skill', { skill: 'loop', args: 'Jeeves tick' }, ALLOW],
+  ['Skill jeeves:setup', 'Skill', { skill: 'jeeves:setup', args: '--scan' }, ALLOW],
+  ['Skill acme:submit-review', 'Skill', { skill: 'acme:submit-review', args: '42 comment' }, BLOCK, 'reviewer'],
+  ['Skill acme:code-review', 'Skill', { skill: 'acme:code-review' }, BLOCK, 'dispatch'],
+  ['Skill from a repo', 'Skill', { skill: 'deploy' }, BLOCK, 'repo specific', REPO],
 ]
 const bash = [
   // allowed

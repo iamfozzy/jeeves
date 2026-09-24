@@ -1,18 +1,18 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   ActionIcon, Alert, Badge, Box, Button, Code, Group, Input, Modal, MultiSelect, NumberInput, SegmentedControl, Select,
   SimpleGrid, Stack, Table, Tabs, TagsInput, Text, TextInput, Textarea, Tooltip, UnstyledButton
 } from '@mantine/core'
 import {
-  IconAdjustments, IconAlertTriangle, IconArrowBackUp, IconCheck, IconChevronRight, IconCopy, IconDeviceFloppy,
-  IconFolderCog, IconKey, IconPencil, IconPlus, IconRobot, IconSearch, IconStack2, IconTrash, IconTypography, IconWand, IconX
+  IconAlertTriangle, IconArrowBackUp, IconBell, IconCheck, IconChevronRight, IconCopy, IconDeviceFloppy,
+  IconFolderCog, IconKey, IconPencil, IconPlus, IconRepeat, IconRobot, IconSearch, IconServer, IconShieldCheck, IconStack2, IconTrash, IconTypography, IconWand, IconX
 } from '@tabler/icons-react'
-import { editAgent, editReminder, getAgents, getConfigView, getGuardLog, getReminders, getSettings, saveConfig, saveSettings, sendOrchInput, type GuardRow } from './api'
+import { editAgent, editReminder, getAgents, getConfigView, getGuardLog, getReminders, getSettings, getStatusLine, installStatusLine, saveConfig, saveSettings, sendOrchInput, type GuardRow, type StatusLineView } from './api'
 import { setToken } from './token'
 import { FONT_NAME, fontStack, previewFont, type FontKind } from './theme'
 import type {
-  AgentDef, AgentOp, AgentsView, BuiltinAgent, CockpitKey, CockpitView, ConfigView, ConfigWrite, LedgerRow,
-  ProjectFields, ProjectState, ProjectView, Reminder, ReminderOp, SettingsView
+  AgentDef, AgentOp, AgentsView, BuiltinAgent, CockpitKey, CockpitView, ConfigView, ConfigWrite,
+  ProjectFields, ProjectView, Reminder, ReminderOp, SettingsView
 } from './types'
 
 type Val = string | string[]
@@ -44,14 +44,15 @@ export function Settings({ opened, onClose, configNonce, onShowOrchestrator }: {
   onShowOrchestrator: () => void   // close Settings and switch to the orchestrator view
 }) {
   const [view, setView] = useState<ConfigView | null>(null)
+  const [s, setS] = useState<SettingsView | null>(null)
   const [loadErr, setLoadErr] = useState<string | null>(null)
 
   useEffect(() => {
     if (!opened) return
     let live = true
-    getConfigView()
-      .then((v) => { if (live) { setView(v); setLoadErr(null) } })
-      .catch(() => { if (live) setLoadErr('could not load config') })
+    Promise.all([getConfigView(), getSettings()])
+      .then(([v, x]) => { if (live) { setView(v); setS(x); setLoadErr(null) } })
+      .catch(() => { if (live) setLoadErr('could not load settings') })
     return () => { live = false }
   }, [opened, configNonce])
 
@@ -64,8 +65,10 @@ export function Settings({ opened, onClose, configNonce, onShowOrchestrator }: {
 
   const loading = loadErr ? <Alert color="red" variant="light" p="xs">{loadErr}</Alert> : <Text size="sm" c="dimmed">Loading…</Text>
 
-  // Vertical tabs on the app's page tone (like the sidebar); each pane scrolls on its
-  // own, so a pane's sticky save bar stays in view.
+  const both = view && s ? { view, s } : null
+
+  // Vertical tabs on the app's page tone (like the sidebar), grouped by what they
+  // configure; each pane scrolls on its own, so a pane's sticky save bar stays in view.
   return (
     <Modal opened={opened} onClose={onClose} title="Settings" size="min(1160px, 94vw)" centered padding={0} className="ck-settings"
       styles={{
@@ -81,10 +84,16 @@ export function Settings({ opened, onClose, configNonce, onShowOrchestrator }: {
           panel: { flex: 1, minWidth: 0, height: '100%' }
         }}>
         <Tabs.List>
+          <Text className="ck-label ck-sgroup">Work</Text>
           <Tabs.Tab className="ck-stab" value="projects" leftSection={<IconFolderCog size={16} />}>Projects</Tabs.Tab>
           <Tabs.Tab className="ck-stab" value="defaults" leftSection={<IconStack2 size={16} />}>Defaults</Tabs.Tab>
           <Tabs.Tab className="ck-stab" value="agents" leftSection={<IconRobot size={16} />}>Agents</Tabs.Tab>
-          <Tabs.Tab className="ck-stab" value="jeeves" leftSection={<IconAdjustments size={16} />}>Jeeves</Tabs.Tab>
+          <Text className="ck-label ck-sgroup">Jeeves</Text>
+          <Tabs.Tab className="ck-stab" value="loop" leftSection={<IconRepeat size={16} />}>Loop</Tabs.Tab>
+          <Tabs.Tab className="ck-stab" value="rules" leftSection={<IconShieldCheck size={16} />}>Rules</Tabs.Tab>
+          <Tabs.Tab className="ck-stab" value="reminders" leftSection={<IconBell size={16} />}>Reminders</Tabs.Tab>
+          <Text className="ck-label ck-sgroup">Cockpit</Text>
+          <Tabs.Tab className="ck-stab" value="cockpit" leftSection={<IconServer size={16} />}>Sessions & access</Tabs.Tab>
           <Tabs.Tab className="ck-stab" value="appearance" leftSection={<IconTypography size={16} />}>Appearance</Tabs.Tab>
         </Tabs.List>
 
@@ -95,8 +104,11 @@ export function Settings({ opened, onClose, configNonce, onShowOrchestrator }: {
           <Pane>{view ? <DefaultsTab view={view} write={write} /> : loading}</Pane>
         </Tabs.Panel>
         <Tabs.Panel value="agents"><Pane><AgentsTab /></Pane></Tabs.Panel>
-        <Tabs.Panel value="jeeves"><Pane>{view ? <JeevesTab view={view} write={write} /> : loading}</Pane></Tabs.Panel>
-        <Tabs.Panel value="appearance"><Pane><AppearanceTab /></Pane></Tabs.Panel>
+        <Tabs.Panel value="loop"><Pane>{both ? <LoopTab {...both} write={write} onSaved={setS} /> : loading}</Pane></Tabs.Panel>
+        <Tabs.Panel value="rules"><Pane>{s ? <RulesTab s={s} onSaved={setS} /> : loading}</Pane></Tabs.Panel>
+        <Tabs.Panel value="reminders"><Pane><RemindersSection /></Pane></Tabs.Panel>
+        <Tabs.Panel value="cockpit"><Pane>{s ? <CockpitTab s={s} onSaved={setS} /> : loading}</Pane></Tabs.Panel>
+        <Tabs.Panel value="appearance"><Pane>{s ? <AppearanceTab s={s} onSaved={setS} /> : loading}</Pane></Tabs.Panel>
       </Tabs>
     </Modal>
   )
@@ -106,20 +118,56 @@ const Pane = ({ children }: { children: ReactNode }) => (
   <Box style={{ height: '100%', overflowY: 'auto', scrollbarGutter: 'stable' }} px={24} pt={20} pb={24}>{children}</Box>
 )
 
-// One settings section: title, an optional one-line description, an optional
-// control on the right, then its content.
-function Section({ title, description, right, children }: { title: string; description?: ReactNode; right?: ReactNode; children: ReactNode }) {
+// One settings section: an optional title (a sub-tab's label stands in for it), an
+// optional one-line description, the file it writes, an optional control on the
+// right, then its content.
+function Section({ title, description, file, right, children }: {
+  title?: string; description?: ReactNode; file?: string; right?: ReactNode; children: ReactNode
+}) {
   return (
     <Box>
       <Group justify="space-between" align="flex-start" wrap="nowrap" gap="md" mb={GAP.head}>
         <Box style={{ minWidth: 0 }}>
-          <Text size="sm" fw={600}>{title}</Text>
-          {description ? <Text size="xs" c="dimmed" mt={2}>{description}</Text> : null}
+          {title ? <Text size="sm" fw={600}>{title}</Text> : null}
+          {description ? <Text size="xs" c="dimmed" mt={title ? 2 : 0}>{description}</Text> : null}
         </Box>
-        {right}
+        {file || right ? (
+          <Group gap={GAP.tight} wrap="nowrap" style={{ flex: 'none' }}>
+            {file ? <Text size="xs" c="dimmed" ff="monospace">{file}</Text> : null}
+            {right}
+          </Group>
+        ) : null}
       </Group>
       {children}
     </Box>
+  )
+}
+
+// Tab-level lead-in: what the tab edits and when a change takes effect.
+const Intro = ({ children }: { children: ReactNode }) => <Text size="sm" c="dimmed">{children}</Text>
+
+// Tabs across the top of a pane, one section each. Every panel stays mounted, so a
+// draft survives switching away, and a tab whose save bar has unsaved changes shows a dot.
+const DirtyCtx = createContext<((dirty: boolean) => void) | null>(null)
+function SubTabs({ tabs }: { tabs: { value: string; label: string; content: ReactNode }[] }) {
+  const [dirty, setDirty] = useState<Record<string, boolean>>({})
+  const report = useRef<Record<string, (d: boolean) => void>>({})
+  const reporter = (v: string) => (report.current[v] ??= (d) => setDirty((x) => (!!x[v] === d ? x : { ...x, [v]: d })))
+  return (
+    <Tabs defaultValue={tabs[0].value}>
+      <Tabs.List mb={GAP.section - 8}>
+        {tabs.map((t) => (
+          <Tabs.Tab key={t.value} value={t.value} rightSection={dirty[t.value] ? <Box className="ck-dirty" aria-label="unsaved changes" /> : null}>
+            {t.label}
+          </Tabs.Tab>
+        ))}
+      </Tabs.List>
+      {tabs.map((t) => (
+        <Tabs.Panel key={t.value} value={t.value}>
+          <DirtyCtx.Provider value={reporter(t.value)}>{t.content}</DirtyCtx.Provider>
+        </Tabs.Panel>
+      ))}
+    </Tabs>
   )
 }
 
@@ -159,7 +207,7 @@ function ProjectsTab({ projects, write, onShowOrchestrator }: { projects: Projec
   return (
     <Section
       title="Projects"
-      description="Each project inherits Defaults; open one to see what it overrides and what Jeeves remembers about it."
+      description="Each project inherits Defaults; open one to see and change what it overrides."
       right={(
         <Tooltip label="Runs /jeeves:setup --scan in the orchestrator" openDelay={300} withArrow>
           <Button size="xs" variant="light" leftSection={<IconPlus size={14} />} loading={adding} onClick={addRepos} style={{ flex: 'none' }}>Add repos…</Button>
@@ -237,7 +285,6 @@ function ProjectPanel({ p, write }: { p: ProjectView; write: Write }) {
       {p.otherOverrides.length ? (
         <Text size="xs" c="dimmed">Also overrides in project.md: {p.otherOverrides.join(', ')} — edit the file to change these.</Text>
       ) : null}
-      <LedgerView state={p.state} />
       <SaveBar dirty={changed.length > 0} onSave={save} onDiscard={() => setDraft({})} />
     </Stack>
   )
@@ -257,53 +304,6 @@ function SourceTag({ tag, onReset }: { tag: 'set' | 'default' | 'unset'; onReset
   return <Badge size="xs" variant="transparent" color="gray">{tag}</Badge>
 }
 
-// The project's open ledger rows, or a legacy prose state.md as-is.
-function LedgerView({ state }: { state: ProjectState }) {
-  const title = <Text size="xs" fw={700} tt="uppercase" c="dimmed" style={{ letterSpacing: '.08em' }}>Open items{state.ledger ? ` · ${state.rows.length}` : ''}</Text>
-  if (!state.ledger) return (
-    <Stack gap={GAP.tight}>
-      {title}
-      <Text size="xs" c="dimmed">Legacy prose state.md — the loop converts it to a ledger on its next launch.</Text>
-      <Code block fz="xs" style={{ maxHeight: 200, overflow: 'auto' }}>{state.raw}</Code>
-    </Stack>
-  )
-  return (
-    <Stack gap={GAP.tight}>
-      {title}
-      {state.rows.length === 0 ? <Text size="xs" c="dimmed">None.</Text> : (
-        <Table fz="xs" verticalSpacing={6} horizontalSpacing={8} withRowBorders={false} highlightOnHover
-          styles={{ table: { background: 'var(--ck-surface)', borderRadius: 8 }, th: { color: 'var(--mantine-color-dimmed)', fontWeight: 600 } }}>
-          <Table.Thead>
-            <Table.Tr><Table.Th>Kind</Table.Th><Table.Th>Id</Table.Th><Table.Th>State</Table.Th><Table.Th>Next</Table.Th><Table.Th>Since</Table.Th></Table.Tr>
-          </Table.Thead>
-          <Table.Tbody>{state.rows.map((r, i) => <LedgerTr key={i} r={r} />)}</Table.Tbody>
-        </Table>
-      )}
-    </Stack>
-  )
-}
-
-function LedgerTr({ r }: { r: LedgerRow }) {
-  const extra = Object.entries(r.extra)
-  const short = (v: string) => (v.length > 32 ? v.slice(0, 31) + '…' : v)
-  return (
-    <Table.Tr style={{ verticalAlign: 'top' }}>
-      <Table.Td c="dimmed">{r.kind}</Table.Td>
-      <Table.Td ff="monospace" style={{ whiteSpace: 'nowrap' }}>{r.id}</Table.Td>
-      <Table.Td style={{ whiteSpace: 'nowrap' }}>{r.state}</Table.Td>
-      <Table.Td>
-        {r.next}
-        {extra.length ? (
-          <Text size="xs" c="dimmed" ff="monospace" mt={2} title={extra.map(([k, v]) => `${k}=${v}`).join('\n')}>
-            {extra.map(([k, v]) => `${k}=${short(v)}`).join(' · ')}
-          </Text>
-        ) : null}
-      </Table.Td>
-      <Table.Td c="dimmed" style={{ whiteSpace: 'nowrap' }}>{r.since ?? ''}</Table.Td>
-    </Table.Tr>
-  )
-}
-
 // ── Defaults + identity ─────────────────────────────────────────────────────
 
 const DEFAULT_SECTIONS: { title: string; fields: FieldSpec[] }[] = [
@@ -318,12 +318,10 @@ const DEFAULT_SECTIONS: { title: string; fields: FieldSpec[] }[] = [
     { key: 'confluenceSpace', label: 'Space', hint: 'Where plan pages are published.' },
     { key: 'plansParent', label: 'Plans parent', hint: 'Plans nest under <parent> > <display name>.' }
   ] },
-  { title: 'GitHub', fields: [
+  { title: 'GitHub & worktrees', fields: [
     { key: 'reviewScope', label: 'Review scope', choices: ['mine', 'repo'], hint: 'repo = also every open teammate PR.' },
-    { key: 'baseBranches', label: 'Base branches', list: true, hint: 'setup --scan picks the first on origin.' }
-  ] },
-  { title: 'Reviews & worktrees', fields: [
     { key: 'reviewCommand', label: 'Review command', placeholder: '/code-review', hint: 'Run when you review a PR.' },
+    { key: 'baseBranches', label: 'Base branches', list: true, hint: 'setup --scan picks the first on origin.' },
     { key: 'seedFiles', label: 'Seed files', list: true, hint: 'Copied into every new worktree.' }
   ] }
 ]
@@ -348,23 +346,16 @@ function useFlatForm(values: Record<string, Val | null>, specs: FieldSpec[]) {
 }
 
 function DefaultsTab({ view, write }: { view: ConfigView; write: Write }) {
-  const { defaults } = view
-  const all = DEFAULT_SECTIONS.flatMap((s) => s.fields)
-  const f = useFlatForm(defaults.values, all)
-  const save = async () => { const e = await write({ file: 'defaults', ...f.payload() }); if (!e) f.clear(); return e }
   return (
     <Stack gap={GAP.section}>
-      <IdentitySection identity={view.identity} write={write} />
-      {!defaults.exists ? <Alert color="blue" variant="light" p="xs">No defaults.md yet — saving creates it from the template.</Alert> : null}
-      {DEFAULT_SECTIONS.map((sec, i) => (
-        <Section key={sec.title} title={sec.title}
-          description={i === 0 ? 'Shared defaults (defaults.md). Every project inherits these unless its project.md sets its own; blank a field to remove it.' : undefined}>
-          <SimpleGrid cols={2} spacing={GAP.field} verticalSpacing={GAP.field}>
-            {sec.fields.map((s) => <FieldInput key={s.key} spec={s} value={f.get(s)} onChange={(v) => f.edit(s.key, v)} />)}
-          </SimpleGrid>
-        </Section>
-      ))}
-      <SaveBar dirty={f.changed.length > 0} onSave={save} onDiscard={f.clear} />
+      <Intro>What every project inherits unless its own project.md overrides it, plus who you are. Blank a field to remove it.</Intro>
+      {!view.defaults.exists ? <Alert color="blue" variant="light" p="xs">No defaults.md yet — saving creates it from the template.</Alert> : null}
+      <SubTabs tabs={[
+        ...DEFAULT_SECTIONS.map((sec) => ({
+          value: sec.title, label: sec.title, content: <DefaultsForm view={view} write={write} sections={[{ specs: sec.fields }]} />
+        })),
+        { value: 'identity', label: 'Identity', content: <IdentitySection identity={view.identity} write={write} /> }
+      ]} />
     </Stack>
   )
 }
@@ -378,7 +369,7 @@ function IdentitySection({ identity, write }: { identity: ConfigView['identity']
     return e
   }
   return (
-    <Section title="Identity" description="identity.md — personal, never shared."
+    <Section description="Personal, never shared." file="identity.md"
       right={(
         <Button size="xs" variant="default" leftSection={editing ? <IconX size={14} /> : <IconPencil size={14} />}
           onClick={() => { f.clear(); setEditing(!editing) }} style={{ flex: 'none' }}>{editing ? 'Cancel' : 'Edit'}</Button>
@@ -474,6 +465,8 @@ function FieldInput({ spec, value, onChange, dimmed, placeholder, tag, disabled,
 // Appears only with unsaved changes (or a result to show), sticky to the bottom of
 // its scrolling pane so Save is always in reach.
 function SaveBar({ dirty, onSave, onDiscard }: { dirty: boolean; onSave: () => Promise<string | null>; onDiscard?: () => void }) {
+  const report = useContext(DirtyCtx)
+  useEffect(() => { report?.(dirty); return () => report?.(false) }, [dirty, report])
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
@@ -546,8 +539,8 @@ function AgentsTab() {
   )
 
   return (
-    <Stack gap={GAP.section}>
-      <Section title="Built-in" description="Shipped with the plugin. Customise one to run your version in cockpit dispatches; headless (Task) dispatches still use the plugin's.">
+    <SubTabs tabs={[{ value: 'builtin', label: 'Built-in', content: (
+      <Section description="Shipped with the plugin. Customise one to run your version in cockpit dispatches; headless (Task) dispatches still use the plugin's.">
         <Stack gap={2}>
           {view.builtin.map((b) => (
             <ExpandRow key={b.name} open={open === b.name} onToggle={() => toggle(b.name)} head={(
@@ -566,7 +559,8 @@ function AgentsTab() {
           ))}
         </Stack>
       </Section>
-      <Section title="Your agents"
+    ) }, { value: 'yours', label: 'Your agents', content: (
+      <Section
         description="<data-home>/agents/ — yours, kept across plugin updates. Jeeves runs one when you ask (run <agent> on <ticket | #pr | repo>) and may suggest one when an item matches its description."
         right={(
           <Button size="xs" variant="light" leftSection={<IconPlus size={14} />} disabled={!!editing?.isNew} style={{ flex: 'none' }}
@@ -592,7 +586,7 @@ function AgentsTab() {
           )}
         </Stack>
       </Section>
-    </Stack>
+    ) }]} />
   )
 }
 
@@ -711,7 +705,7 @@ function AgentEditor({ editing, choices, taken, onSave, onCancel }: {
       <SimpleGrid cols={2} spacing={GAP.field} verticalSpacing={GAP.field}>
         <FieldInput spec={{ key: 'name', label: 'Name', hint: 'What you type in run <name> on …', placeholder: 'e.g. security-audit' }}
           value={d.name} onChange={edit('name')} disabled={!editing.isNew} error={nameErr} />
-        <FieldInput spec={{ key: 'model', label: 'Model', select: choices.models, hint: 'inherit = the worker model (Settings → Jeeves).' }}
+        <FieldInput spec={{ key: 'model', label: 'Model', select: choices.models, hint: 'inherit = the worker model (Settings → Loop).' }}
           value={d.model} onChange={edit('model')} />
       </SimpleGrid>
       <FieldInput spec={{ key: 'description', label: 'When to use it', hint: 'One line. The loop matches items against this to suggest the agent.' }}
@@ -725,66 +719,93 @@ function AgentEditor({ editing, choices, taken, onSave, onCancel }: {
   )
 }
 
-// ── Jeeves ──────────────────────────────────────────────────────────────────
-// cockpit.json (models, autonomy, session hygiene), defaults.md loop fields
-// (cadence, notifications), reminders.md, loop constraints and the cockpit's address.
+// ── Jeeves: Loop, Rules, Reminders ──────────────────────────────────────────
+// Loop: cockpit.json models and autonomy, defaults.md loop fields. Rules: loop
+// constraints and what the guard refused. Reminders: reminders.md.
 
-function JeevesTab({ view, write }: { view: ConfigView; write: Write }) {
-  const [s, setS] = useState<SettingsView | null>(null)
-  const [err, setErr] = useState<string | null>(null)
-
-  useEffect(() => {
-    let live = true
-    getSettings().then((v) => { if (live) setS(v) }).catch(() => { if (live) setErr('could not load settings') })
-    return () => { live = false }
-  }, [])
-
-  if (!s) return err ? <Alert color="red" variant="light" p="xs">{err}</Alert> : <Text size="sm" c="dimmed">Loading…</Text>
+function LoopTab({ view, s, write, onSaved }: { view: ConfigView; s: SettingsView; write: Write; onSaved: (v: SettingsView) => void }) {
   const c = s.cockpit.choices
   return (
     <Stack gap={GAP.section}>
-      <Section title="Models & effort"
-        description="cockpit.json. Applies to sessions spawned from now on; the orchestrator switches on its next Restart.">
-        <CockpitForm s={s.cockpit} onSaved={setS} specs={[
-          { key: 'orchModel', label: 'Orchestrator model', select: c.models, hint: 'Runs the loop.' },
-          { key: 'orchEffort', label: 'Orchestrator effort', choices: c.efforts, hint: 'Reasoning effort for the loop.' },
-          { key: 'workerModel', label: 'Worker model', select: c.models, hint: 'Dispatched workers. Any Opus the loop asks for runs as this if it is an Opus, else Opus 5.5.' }
-        ]} />
-      </Section>
-      <Section title="Autonomy"
-        description="Permission mode for new spawns. Keep both the same so worker messages reach the orchestrator without approval.">
-        <CockpitForm s={s.cockpit} onSaved={setS} specs={[
-          { key: 'orchPermission', label: 'Orchestrator', select: c.permissionModes, hint: 'Applies on the orchestrator\'s next Restart.' },
-          { key: 'workerPermission', label: 'Workers', select: c.permissionModes, hint: 'Applies to workers dispatched from now on.' }
-        ]} />
-      </Section>
-      <LoopForm title="Loop cadence" view={view} write={write}
-        description="defaults.md — the loop reads these at launch, so they apply on the orchestrator's next Restart. Blank = the default shown."
-        specs={CADENCE} />
-      <Section title="Session hygiene" description="cockpit.json. Takes effect at once.">
-        <CockpitForm s={s.cockpit} onSaved={setS} specs={[
-          { key: 'rotatePct', label: 'Restart threshold (%)', range: [1, 100], hint: 'The context badge turns red and Restart lights at this share of the window.' },
-          { key: 'compactPct', label: 'Auto-compact threshold (%)', range: [0, 100], hint: 'Between ticks, with no worker running, the orchestrator runs /compact at this share of the window; 0 = never.' },
-          { key: 'detachMinutes', label: 'Detached tab lifetime (min)', range: [0, 10080], hint: 'A tab with no browser attached ends after this; 0 = never. The orchestrator and workers never do.' }
-        ]} />
-      </Section>
-      <LoopForm title="Notifications" view={view} write={write}
-        description="defaults.md — push notifications the loop sends. Applies on the orchestrator's next Restart."
-        specs={NOTIFY} />
-      <RemindersSection />
-      <ConstraintsSection s={s} onSaved={setS} />
-      <GuardSection />
-      <CockpitInfo s={s} onSaved={setS} />
+      <Intro>How Jeeves runs. The loop reads these when it launches, so most apply on the orchestrator's next Restart.</Intro>
+      <SubTabs tabs={[
+        { value: 'models', label: 'Models & permissions', content: (
+          <CockpitForm s={s.cockpit} onSaved={onSaved} sections={[
+            { title: 'Orchestrator', description: 'The session that runs the loop. Applies on its next Restart.', specs: [
+              { key: 'orchModel', label: 'Model', select: c.models },
+              { key: 'orchEffort', label: 'Effort', choices: c.efforts, hint: 'Reasoning effort for the loop.' },
+              { key: 'orchPermission', label: 'Permission mode', select: c.permissionModes, hint: "Match the workers' so their messages arrive without approval." }
+            ] },
+            { title: 'Workers', description: 'Sessions the loop dispatches. Applies to the next dispatch.', specs: [
+              { key: 'workerModel', label: 'Model', select: c.models, hint: 'Any Opus the loop asks for runs as this if it is an Opus, else Opus 5.5.' },
+              { key: 'workerPermission', label: 'Permission mode', select: c.permissionModes, hint: "Match the orchestrator's." }
+            ] }
+          ]} />
+        ) },
+        { value: 'schedule', label: 'Schedule', content: (
+          <DefaultsForm view={view} write={write} sections={[{ description: 'How long the loop waits between ticks. Blank = the default shown.', specs: SCHEDULE }]} />
+        ) },
+        { value: 'messages', label: 'Messages', content: (
+          <DefaultsForm view={view} write={write} sections={[{ description: 'How Jeeves talks to you, and the daily round-up.', specs: MESSAGES }]} />
+        ) },
+        { value: 'notify', label: 'Notifications', content: (
+          <DefaultsForm view={view} write={write} sections={[{ description: 'Claude Code push notifications the loop sends.', specs: NOTIFY }]} />
+        ) }
+      ]} />
     </Stack>
   )
 }
 
-type CockpitSpec = FieldSpec & { key: CockpitKey }
+function RulesTab({ s, onSaved }: { s: SettingsView; onSaved: (v: SettingsView) => void }) {
+  return (
+    <Stack gap={GAP.section}>
+      <Intro>What the orchestrator may do itself; anything else it dispatches to a worker.</Intro>
+      <SubTabs tabs={[
+        { value: 'constraints', label: 'Constraints', content: <ConstraintsSection s={s} onSaved={onSaved} /> },
+        { value: 'guard', label: 'Guard refusals', content: <GuardSection /> }
+      ]} />
+    </Stack>
+  )
+}
 
-// One group of cockpit.json settings with its own save bar. A value pinned by an
-// env var is read-only here; a blank number, or a value equal to the default,
-// resets to the default. `resettable` adds a Reset to defaults action.
-function CockpitForm({ s, specs, onSaved, resettable }: { s: CockpitView; specs: CockpitSpec[]; onSaved: (v: SettingsView) => void; resettable?: boolean }) {
+// ── Cockpit: Sessions & access, Appearance ──────────────────────────────────
+
+function CockpitTab({ s, onSaved }: { s: SettingsView; onSaved: (v: SettingsView) => void }) {
+  return (
+    <SubTabs tabs={[
+      { value: 'sessions', label: 'Sessions', content: (
+        <CockpitForm s={s.cockpit} onSaved={onSaved} sections={[
+          { description: 'When a tab needs a restart, compacts or ends. Takes effect at once.', specs: [
+            { key: 'rotatePct', label: 'Restart threshold (%)', range: [1, 100], hint: 'The context badge turns red and Restart lights at this share of the window.' },
+            { key: 'compactPct', label: 'Auto-compact threshold (%)', range: [0, 100], hint: 'Between ticks, with no worker running, the orchestrator runs /compact at this share; 0 = never.' },
+            { key: 'detachMinutes', label: 'Detached tab lifetime (min)', range: [0, 10080], hint: 'A tab with no browser attached ends after this; 0 = never. The orchestrator and workers never do.' }
+          ] }
+        ]} />
+      ) },
+      { value: 'claude', label: 'Claude Code', content: (
+        <Stack gap="xl">
+          <CockpitForm s={s.cockpit} onSaved={onSaved} sections={[
+            { title: 'Display', description: 'For Claude sessions the cockpit starts from now on (tabs, workers, the orchestrator on its next Restart).', specs: [
+              { key: 'claudeTui', label: 'Renderer', choices: ['fullscreen', 'default'], hint: 'fullscreen: Claude draws the whole pane and scrolls it itself. default: the classic inline renderer.' },
+              { key: 'scrollSpeed', label: 'Fullscreen scroll speed', range: [1, 20], hint: 'Lines per mouse-wheel step in fullscreen; Claude still accelerates fast scrolls.' }
+            ] }
+          ]} />
+          <StatusLineSection />
+        </Stack>
+      ) },
+      { value: 'access', label: 'Access', content: <CockpitInfo s={s} onSaved={onSaved} /> }
+    ]} />
+  )
+}
+
+type CockpitSpec = FieldSpec & { key: CockpitKey }
+type FormSection<T> = { title?: string; description?: string; specs: T[] }
+
+// cockpit.json settings under one or more section headings, sharing one save bar.
+// A value pinned by an env var is read-only here; a blank number, or a value equal
+// to the default, resets to the default. `resettable` adds a Reset to defaults action.
+function CockpitForm({ s, sections, onSaved, resettable }: { s: CockpitView; sections: FormSection<CockpitSpec>[]; onSaved: (v: SettingsView) => void; resettable?: boolean }) {
+  const specs = sections.flatMap((x) => x.specs)
   const f = useFlatForm(Object.fromEntries(specs.map((x) => [x.key, String(s.values[x.key])])), specs)
   const [resets, setResets] = useState(0) // remounts the inputs so each re-derives its local state
   const save = async () => {
@@ -802,21 +823,25 @@ function CockpitForm({ s, specs, onSaved, resettable }: { s: CockpitView; specs:
   const atDefaults = specs.every((x) => s.pinned[x.key] || f.get(x) === String(s.defaults[x.key]))
   const bypass = specs.some((x) => f.get(x) === 'bypassPermissions')
   return (
-    <Stack gap={GAP.field}>
-      <SimpleGrid key={resets} cols={2} spacing={GAP.field} verticalSpacing={GAP.field}>
-        {specs.map((x) => {
-          const env = s.pinned[x.key]
-          return (
-            <FieldInput key={x.key} spec={x} value={f.get(x)} onChange={(v) => f.edit(x.key, v)} disabled={!!env}
-              placeholder={String(s.defaults[x.key])}
-              tag={env ? (
-                <Tooltip label={`Set by $${env} — unset it to edit here`} openDelay={300} withArrow>
-                  <Badge size="xs" variant="light" color="gray">${env}</Badge>
-                </Tooltip>
-              ) : undefined} />
-          )
-        })}
-      </SimpleGrid>
+    <Stack gap={GAP.section}>
+      {sections.map((sec) => (
+        <Section key={sec.title ?? ''} title={sec.title} description={sec.description} file="cockpit.json">
+          <SimpleGrid key={resets} cols={2} spacing={GAP.field} verticalSpacing={GAP.field}>
+            {sec.specs.map((x) => {
+              const env = s.pinned[x.key]
+              return (
+                <FieldInput key={x.key} spec={x} value={f.get(x)} onChange={(v) => f.edit(x.key, v)} disabled={!!env}
+                  placeholder={String(s.defaults[x.key])}
+                  tag={env ? (
+                    <Tooltip label={`Set by $${env} — unset it to edit here`} openDelay={300} withArrow>
+                      <Badge size="xs" variant="light" color="gray">${env}</Badge>
+                    </Tooltip>
+                  ) : undefined} />
+              )
+            })}
+          </SimpleGrid>
+        </Section>
+      ))}
       {bypass ? (
         <Group gap={6} wrap="nowrap">
           <IconAlertTriangle size={15} color="var(--mantine-color-orange-6)" style={{ flex: 'none' }} />
@@ -835,16 +860,18 @@ function CockpitForm({ s, specs, onSaved, resettable }: { s: CockpitView; specs:
 
 // defaults.md loop fields: `dflt` is what the loop uses when the field is unset;
 // `dependsOn` dims a field while the switch it depends on is off.
-type LoopSpec = FieldSpec & { dflt: string; dependsOn?: string }
+type LoopSpec = FieldSpec & { dflt?: string; dependsOn?: string }
 const ON_OFF = ['on', 'off']
-const CADENCE: LoopSpec[] = [
+const SCHEDULE: LoopSpec[] = [
   { key: 'tickSeconds', label: 'Tick (seconds)', dflt: '300', hint: 'Normal wait between ticks.' },
   { key: 'tickMidFlightSeconds', label: 'Mid-flight tick (seconds)', dflt: '120', hint: 'While a worker is running.' },
-  { key: 'tickOvernightSeconds', label: 'Overnight tick (seconds)', dflt: '1800', hint: 'Inside the overnight window.' },
   { key: 'overnight', label: 'Overnight window', dflt: '22:00-08:00', hint: 'HH:MM-HH:MM, local time.' },
+  { key: 'tickOvernightSeconds', label: 'Overnight tick (seconds)', dflt: '1800', hint: 'Inside the overnight window.' }
+]
+const MESSAGES: LoopSpec[] = [
   { key: 'dailySummary', label: 'Daily summary', dflt: 'on', choices: ON_OFF, hint: 'Done since yesterday, in flight, waiting on you.' },
   { key: 'dailySummaryAt', label: 'Daily summary at', dflt: '09:00', dependsOn: 'dailySummary', hint: 'The first tick after this time, once a day.' },
-  { key: 'voice', label: 'Voice', dflt: 'plain, direct', hint: 'How Jeeves talks, e.g. "British, dry". Brevity and no filler apply whatever you pick.' }
+  { key: 'voice', label: 'Voice', dflt: 'plain, direct', hint: 'e.g. "British, dry". Brevity and no filler apply whatever you pick.' }
 ]
 const NOTIFY: LoopSpec[] = [
   { key: 'pushNotifications', label: 'Push notifications', dflt: 'on', choices: ON_OFF, hint: 'Off silences every kind below.' },
@@ -853,28 +880,63 @@ const NOTIFY: LoopSpec[] = [
   { key: 'notifyReviewReady', label: 'Review ready', dflt: 'on', choices: ON_OFF, dependsOn: 'pushNotifications', hint: "When a reviewer's compiled report lands." }
 ]
 
-function LoopForm({ title, description, specs, view, write }: { title: string; description: string; specs: LoopSpec[]; view: ConfigView; write: Write }) {
-  const raw = view.defaults.values as unknown as Record<string, string | null>
+// defaults.md fields under one or more section headings, sharing one save bar.
+function DefaultsForm({ sections, view, write }: { sections: FormSection<LoopSpec>[]; view: ConfigView; write: Write }) {
+  const specs = sections.flatMap((x) => x.specs)
+  const raw = view.defaults.values as unknown as Record<string, Val | null>
   // A switch shows its default when unset; a text field stays blank with the default as placeholder.
-  const f = useFlatForm(Object.fromEntries(specs.map((x) => [x.key, raw[x.key] ?? (x.choices ? x.dflt : null)])), specs)
+  const f = useFlatForm(Object.fromEntries(specs.map((x) => [x.key, raw[x.key] ?? (x.choices ? x.dflt ?? null : null)])), specs)
   const save = async () => { const e = await write({ file: 'defaults', ...f.payload() }); if (!e) f.clear(); return e }
   const off = (key?: string) => { const d = key ? specs.find((x) => x.key === key) : undefined; return !!d && f.get(d) === 'off' }
   return (
-    <Section title={title} description={description}>
-      <Stack gap={GAP.field}>
-        <SimpleGrid cols={2} spacing={GAP.field} verticalSpacing={GAP.field}>
-          {specs.map((x) => (
-            <FieldInput key={x.key} spec={x} value={f.get(x)} onChange={(v) => f.edit(x.key, v)} placeholder={x.dflt} dimmed={off(x.dependsOn)} />
-          ))}
-        </SimpleGrid>
-        <SaveBar dirty={f.changed.length > 0} onSave={save} onDiscard={f.clear} />
+    <Stack gap={GAP.section}>
+      {sections.map((sec) => (
+        <Section key={sec.title ?? ''} title={sec.title} description={sec.description} file="defaults.md">
+          <SimpleGrid cols={2} spacing={GAP.field} verticalSpacing={GAP.field}>
+            {sec.specs.map((x) => (
+              <FieldInput key={x.key} spec={x} value={f.get(x)} onChange={(v) => f.edit(x.key, v)} placeholder={x.dflt} dimmed={off(x.dependsOn)} />
+            ))}
+          </SimpleGrid>
+        </Section>
+      ))}
+      <SaveBar dirty={f.changed.length > 0} onSave={save} onDiscard={f.clear} />
+    </Stack>
+  )
+}
+
+// The Claude Code status line: dir:branch · model / effort, then ctx % · 5h % · 7d % with
+// time to reset. Installing copies it to ~/.claude and sets settings.json's statusLine.
+function StatusLineSection() {
+  const [v, setV] = useState<StatusLineView | null>(null)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { getStatusLine().then(setV).catch(() => setV({ current: null, installed: false, error: 'could not read ~/.claude/settings.json' })) }, [])
+  const install = async (replace: boolean) => {
+    setBusy(true)
+    const r = await installStatusLine(replace).catch((e): StatusLineView => ({ current: v?.current ?? null, installed: false, error: String(e) }))
+    setBusy(false); setV(r)
+  }
+  return (
+    <Section file="~/.claude/settings.json"
+      description="Two lines under every Claude Code prompt: folder:branch · model / effort, then context, 5-hour and 7-day usage with time to reset. Applies to Claude sessions started afterwards.">
+      <Stack gap={8}>
+        <Text size="xs" c="dimmed">Current: <Text span ff="monospace" size="xs">{v?.current ?? 'none'}</Text></Text>
+        {v?.error ? <Alert color="red" variant="light">{v.error}</Alert> : null}
+        {v?.needsConfirm ? (
+          <Alert color="yellow" variant="light" title="Replace your status line?">
+            <Text size="sm" mb={8}>You already use <Text span ff="monospace">{v.current}</Text>. Installing replaces it (settings.json is backed up).</Text>
+            <Group gap={8}><Button size="compact-sm" color="yellow" loading={busy} onClick={() => install(true)}>Replace</Button><Button size="compact-sm" variant="subtle" color="gray" onClick={() => setV({ ...v, needsConfirm: false })}>Keep mine</Button></Group>
+          </Alert>
+        ) : (
+          <Group gap={8}>
+            <Button size="compact-sm" loading={busy} disabled={!v} onClick={() => install(false)}>{v?.installed ? 'Reinstall' : 'Install'}</Button>
+            {v?.installed ? <Text size="xs" c="teal">Installed</Text> : null}
+          </Group>
+        )}
       </Stack>
     </Section>
   )
 }
 
-// reminders.md, shared with the loop (it re-reads the file every tick).
-const dueDate = (due: string) => new Date(due.replace(' ', 'T'))
 // What the orchestrator's guard refused (guard.log), newest first: a refusal it genuinely
 // needed is a case for widening bin/guard-orchestrator.mjs's allowlist.
 function GuardSection() {
@@ -883,8 +945,8 @@ function GuardSection() {
   useEffect(load, [])
   const when = (at: string) => new Date(at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
   return (
-    <Section title="Guard refusals" description="What the orchestrator tried and was stopped from doing itself — it should have dispatched it. One it genuinely needed means the allowlist should grow."
-      right={<Button size="compact-xs" variant="subtle" color="gray" onClick={load}>Refresh</Button>}>
+    <Section description="What the orchestrator tried itself and was stopped from doing. One it genuinely needed means the allowlist should grow."
+      file="guard.log" right={<Button size="compact-xs" variant="subtle" color="gray" onClick={load}>Refresh</Button>}>
       {rows === null ? <Text size="sm" c="dimmed">Loading…</Text> : !rows.length ? <Text size="sm" c="dimmed">Nothing refused yet.</Text> : (
         <Stack gap={8}>
           {rows.slice(0, 30).map((r, i) => (
@@ -903,6 +965,8 @@ function GuardSection() {
   )
 }
 
+// reminders.md, shared with the loop (it re-reads the file every tick).
+const dueDate = (due: string) => new Date(due.replace(' ', 'T'))
 function RemindersSection() {
   const [rows, setRows] = useState<Reminder[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -937,7 +1001,7 @@ function RemindersSection() {
     <Button size="compact-xs" variant="subtle" color="gray" disabled={busy} onClick={() => run({ op: 'snooze', id, by })}>+{by}</Button>
   )
   return (
-    <Section title="Reminders" description="reminders.md — the loop surfaces each one when it falls due and picks up changes here on its next tick.">
+    <Section title="Reminders" description="The loop surfaces each one when it falls due, and picks up changes here on its next tick." file="reminders.md">
       <Stack gap={GAP.field}>
         {rows == null ? (err ? null : <Text size="xs" c="dimmed">Loading…</Text>)
           : sorted.length === 0 ? <Text size="xs" c="dimmed">None pending.</Text> : (
@@ -992,8 +1056,8 @@ function ConstraintsSection({ s, onSaved }: { s: SettingsView; onSaved: (v: Sett
     return null
   }
   return (
-    <Section title="Constraints"
-      description="The shipped baseline always applies; your additions layer on top and win on a direct conflict. Applies on the orchestrator's next restart.">
+    <Section
+      description="The shipped baseline always applies; your additions layer on top and win on a direct conflict. Applies on the orchestrator's next Restart.">
       <Stack gap={GAP.field}>
         <ExpandRow open={showBase} onToggle={() => setShowBase(!showBase)} head={<>
           <Text size="sm" fw={600}>Baseline</Text>
@@ -1030,7 +1094,7 @@ function CockpitInfo({ s, onSaved }: { s: SettingsView; onSaved: (v: SettingsVie
   }
 
   return (
-    <Section title="Cockpit" description="Where this cockpit lives and how to reach it.">
+    <Section description="Where this cockpit lives and how to reach it.">
       <Stack gap={GAP.field}>
         <Stack gap={6} p={12} style={{ background: 'var(--ck-page)', borderRadius: 8 }}>
           <KV k="Data home" v={s.home} />
@@ -1079,23 +1143,15 @@ const MONO_FONTS = [
 ]
 const FONT_SAMPLE: Record<FontKind, string> = { ui: 'The quick brown fox — Stories · My PRs · fix/slow-build', mono: 'git status · const x = 0O1lI' }
 
-function AppearanceTab() {
-  const [s, setS] = useState<SettingsView | null>(null)
-  const [err, setErr] = useState<string | null>(null)
-  useEffect(() => {
-    let live = true
-    getSettings().then((v) => { if (live) setS(v) }).catch(() => { if (live) setErr('could not load settings') })
-    return () => { live = false }
-  }, [])
-  if (!s) return err ? <Alert color="red" variant="light" p="xs">{err}</Alert> : <Text size="sm" c="dimmed">Loading…</Text>
+function AppearanceTab({ s, onSaved }: { s: SettingsView; onSaved: (v: SettingsView) => void }) {
   return (
-    <Section title="Fonts" description="cockpit.json — every browser uses these. Saving applies them in every open cockpit tab at once.">
-      <CockpitForm s={s.cockpit} onSaved={setS} resettable specs={[
+    <CockpitForm s={s.cockpit} onSaved={onSaved} resettable sections={[
+      { title: 'Fonts', description: 'Every browser uses these. Saving applies them in every open cockpit tab at once.', specs: [
         { key: 'uiFont', label: 'UI font', font: 'ui', hint: 'Menus, the dashboard, Settings.' },
         { key: 'monoFont', label: 'Code & terminal font', font: 'mono', hint: 'Terminals, diffs, code in markdown.' },
         { key: 'terminalFontSize', label: 'Terminal font size (px)', range: [10, 20], hint: '10–20. Terminals refit to the new size.' }
-      ]} />
-    </Section>
+      ] }
+    ]} />
   )
 }
 

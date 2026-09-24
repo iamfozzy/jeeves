@@ -4,8 +4,8 @@
 // and never touches a real cockpit.
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -17,6 +17,9 @@ const tmp = mkdtempSync(join(tmpdir(), 'jeeves-server-'))
 const COCKPIT = join(tmp, 'cockpit')
 const HOME = join(tmp, 'home')
 const DATA = join(HOME, 'jeeves')
+// A stand-in `claude` first on PATH: a dispatched worker records its argv here and exits.
+const BIN = join(tmp, 'bin')
+const CLAUDE_ARGS = join(tmp, 'claude-args.json')
 let srv, base
 
 const freePort = () => new Promise((res, rej) => {
@@ -28,12 +31,16 @@ before(async () => {
   mkdirSync(COCKPIT, { recursive: true })
   mkdirSync(DATA, { recursive: true })
   copyFileSync(join(ROOT, 'server.mjs'), join(COCKPIT, 'server.mjs'))
+  cpSync(join(ROOT, '..', 'agents'), join(tmp, 'agents'), { recursive: true }) // the built-ins, beside cockpit/ as in the plugin
   symlinkSync(join(ROOT, 'node_modules'), join(COCKPIT, 'node_modules'), 'junction')
+  mkdirSync(BIN)
+  writeFileSync(join(BIN, 'claude'), `#!${process.execPath}\nrequire('fs').writeFileSync(${JSON.stringify(CLAUDE_ARGS)}, JSON.stringify(process.argv.slice(2)))\n`)
+  chmodSync(join(BIN, 'claude'), 0o755)
   let port
   do port = await freePort(); while (port === 4177)
   srv = spawn(process.execPath, [join(COCKPIT, 'server.mjs')], {
     cwd: COCKPIT,
-    env: { ...process.env, HOME, USERPROFILE: HOME, PORT: String(port), JEEVES_TOKEN: TOKEN, JEEVES_HOME: DATA, JEEVES_SCRATCH_ROOT: '' },
+    env: { ...process.env, PATH: `${BIN}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}`, HOME, USERPROFILE: HOME, PORT: String(port), JEEVES_TOKEN: TOKEN, JEEVES_HOME: DATA, JEEVES_SCRATCH_ROOT: '' },
     stdio: ['ignore', 'pipe', 'pipe']
   })
   let log = ''
@@ -120,6 +127,46 @@ test('/api/reminders', async (t) => {
     assert.deepEqual(r.body.reminders.map((x) => x.id), ['r2'])
     assert.equal(readFileSync(FILE, 'utf8'), HEADER + '- r2 · due 2099-01-31 23:30 · b\n')
   })
+})
+
+test('/api/agents', async (t) => {
+  const agent = { description: 'My take.', tools: ['Read'], model: 'inherit', prompt: 'Review it my way.' }
+  await t.test('lists every built-in', async () => {
+    const names = (await api('/api/agents')).body.builtin.map((a) => a.name)
+    assert.deepEqual(names, ['investigator', 'loop-verifier', 'planner', 'review-resolver', 'reviewer', 'story-worker'])
+  })
+  await t.test('the worker label is reserved', async () => {
+    assert.equal((await api('/api/agents', { op: 'save', agent: { ...agent, name: 'worker' }, isNew: true })).status, 400)
+  })
+  await t.test('saving a built-in\'s name customises it', async () => {
+    const r = await api('/api/agents', { op: 'save', agent: { ...agent, name: 'reviewer' } })
+    assert.equal(r.status, 200)
+    const b = r.body.builtin.find((a) => a.name === 'reviewer')
+    assert.equal(b.override.prompt, 'Review it my way.\n')
+    assert.equal(b.override.stale, false)
+    assert.equal((await api('/api/agents', { op: 'delete', name: 'reviewer' })).body.builtin.find((a) => a.name === 'reviewer').override, null)
+  })
+})
+
+test('a reviewer dispatch carries the project\'s review command', { skip: process.platform === 'win32' && 'the stand-in claude is a shebang script' }, async () => {
+  const repo = join(HOME, 'Dev', 'demo')
+  mkdirSync(repo, { recursive: true })
+  const git = (...a) => execFileSync('git', ['-C', repo, ...a], { stdio: 'ignore' })
+  git('init', '-q', '-b', 'main'); git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init')
+  const { Client } = await import(join(ROOT, 'node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js'))
+  const { StreamableHTTPClientTransport } = await import(join(ROOT, 'node_modules/@modelcontextprotocol/sdk/dist/esm/client/streamableHttp.js'))
+  const client = new Client({ name: 'test', version: '1' })
+  await client.connect(new StreamableHTTPClientTransport(new URL(base + '/mcp'), { requestInit: { headers: { authorization: `Bearer ${TOKEN}` } } }))
+  try {
+    const call = async (name, args) => { const r = await client.callTool({ name, arguments: args }); assert.ok(!r.isError, JSON.stringify(r.content)); return r.content[0].text }
+    await call('create_project', { id: 'demo', repo: 'acme/demo', path: repo, baseBranch: 'main', reviewCommand: '/code-review high' })
+    const out = JSON.parse(await call('dispatch', { agent: 'reviewer', repo: 'demo', ticket: '7', prompt: 'Review PR #7 against main.' }))
+    assert.ok(out.workId, JSON.stringify(out))
+    for (let i = 0; i < 50 && !existsSync(CLAUDE_ARGS); i++) await new Promise((r) => setTimeout(r, 100))
+    const argv = JSON.parse(readFileSync(CLAUDE_ARGS, 'utf8'))
+    assert.equal(argv.at(-1), 'Review PR #7 against main.\n\nReview command for this project: /code-review high')
+    assert.equal(argv[argv.indexOf('--agent') + 1], 'reviewer')
+  } finally { await client.close() }
 })
 
 test('/api/layout', async (t) => {
