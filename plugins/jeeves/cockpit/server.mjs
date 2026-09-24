@@ -253,6 +253,9 @@ const sessionStatus = new Map()
 // launch. { parent, kind, cwd, prompt, result, sid } — sid is bound on first
 // attach. In memory: after a server restart a child is an ordinary tab.
 const tabLinks = new Map()
+// Shell tabs opened with a `command` (open_space / add_tab), keyed by the tab's id:
+// the command is typed into the shell once it first prints, on the tab's first spawn.
+const pendingRuns = new Map()
 const pushSessionStatus = (sid, status) => broadcast({ t: 'sessionStatus', sid, status })
 // Project config changed (created / updated / deleted) — tell the UI to refetch.
 const pushConfig = () => broadcast({ t: 'config' })
@@ -1542,8 +1545,10 @@ function sessionSettings(id) {
     Notification: [post('awaiting')],
     Stop: [post('idle')],
     SessionEnd: [post('offline')],
-    // The orchestrator edits nothing outside its data home, and its ledgers only through write_state.
-    ...(id === 'orch:main' ? { PreToolUse: [{ matcher: 'Edit|Write|MultiEdit|NotebookEdit', hooks: [{ type: 'command', command: `"${process.execPath}" "${GUARD_SCRIPT}" "${NEUTRAL}"` }] }] } : {})
+    // The orchestrator dispatches work and never does it (bin/guard-orchestrator.mjs):
+    // no edits outside its data home, ledgers only through write_state, reads of its
+    // own files only, an allowlisted Bash, and no Agent/Task.
+    ...(id === 'orch:main' ? { PreToolUse: [{ matcher: 'Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|Bash|Agent|Task', hooks: [{ type: 'command', command: `"${process.execPath}" "${GUARD_SCRIPT}" "${NEUTRAL}" "${join(__dirname, '..')}"` }] }] } : {})
   } })
 }
 
@@ -1684,6 +1689,11 @@ function attach(ws, sid, cwd, kind) {
       try { ws.send(JSON.stringify({ t: 'o', d: `\r\n[cockpit: failed to spawn ${file} — ${err.message}]\r\n` })) } catch {}
       return ws.close()
     }
+    const run = kind === 'shell' && pendingRuns.get(sid.split(':')[1])
+    if (run) {
+      pendingRuns.delete(sid.split(':')[1])
+      const s = sess, sub = s.term.onData(() => { sub.dispose(); setTimeout(() => { try { s.term.write(run + '\r') } catch {} }, 150) })
+    }
   }
 
   // Every pane attached to the session (another browser tab, the phone) gets the
@@ -1730,8 +1740,18 @@ async function dispatch({ agent, repo, ticket, branch, prompt, model }) {
   // branch, so a planner's scratch worktree is obviously a planner's, not just
   // the ticket. Story-workers pass their real branch, so it's used as-is.
   const br = String(branch || (ticket ? `${agent || 'work'}-${ticket}` : `${agent || 'work'}-${Date.now().toString(36)}`))
-  const wt = await createWorktree(r, br)
-  if (wt.error) return { error: wt.error }
+  // A branch that already has a worktree reuses it when nothing else is in it: not a
+  // live worker's, and no uncommitted changes. Otherwise say why, never clobber it.
+  const existing = (await listWorktrees(r)).find((w) => w.branch === br)
+  if (existing) {
+    const owner = workerList().find((w) => normalize(w.cwd) === normalize(existing.path) && !['done', 'blocked', 'error', 'exited'].includes(w.status))
+    if (owner) return { error: `worker ${owner.workId} (${owner.agent}) is live in ${existing.path} — send it the follow-up with SendMessage instead of dispatching` }
+    const st = await runGit(existing.path, ['status', '--porcelain'])
+    if (!st.ok || st.out.trim()) return { error: `${existing.path} has uncommitted changes — surface it to the user rather than dispatching over it` }
+    try { unlinkSync(join(existing.path, REPORT_FILE)) } catch {} // the last worker's report would read as this one's
+  }
+  const wt = existing ? { path: existing.path } : await createWorktree(r, br)
+  if (wt.error) return { error: wt.error + (/already exists/.test(wt.error) ? ' — a leftover folder, not a registered worktree: ask the user to remove it, never delete it yourself' : '') }
   dynRoots.add(normalize(wt.path))
   const workId = 'w' + randomBytes(3).toString('hex')
   const sid = 'work:' + workId
@@ -2104,10 +2124,12 @@ function buildMcpServer(role, caller) {
       branch: z.string().optional().describe('Branch to open — local or an origin branch (checked out into a tracking branch).'),
       pr: z.union([z.string(), z.number()]).optional().describe('PR number; its head branch is opened.'),
       path: z.string().optional().describe('Path of an existing worktree to open directly.'),
-      tab: z.enum(['claude', 'shell', 'codex']).optional().describe('Kind of the first tab (default claude).'),
+      tab: z.enum(['claude', 'shell', 'codex']).optional().describe('Kind of the first tab (default claude; shell when command is given).'),
+      command: z.string().optional().describe('A shell command the first tab starts running, for the USER to watch or use — e.g. "yarn install && yarn dev --port 7173". Opens a shell tab.'),
       label: z.string().optional().describe('Display name for the space; defaults to the branch / PR / worktree.')
     }
   }, async (a) => {
+    if (a.command && a.tab && a.tab !== 'shell') return bad('command runs in a shell tab — drop tab or pass tab: "shell"')
     const r = findRepo(a.repo)
     if (!r) return bad('unknown repo: ' + a.repo)
     let cwd, label = a.label
@@ -2134,7 +2156,9 @@ function buildMcpServer(role, caller) {
     if (!hasBrowser()) return bad('no cockpit browser tab is connected — cannot open a space (ask the user to open the cockpit)')
     dynRoots.add(normalize(cwd))
     const spaceRef = 'os' + randomBytes(3).toString('hex')
-    broadcast({ t: 'open_space', cmd: { id: spaceRef, repoId: r.id, cwd, label, kind: a.tab || 'claude' } })
+    const kind = a.command ? 'shell' : a.tab || 'claude', tab = { id: randomBytes(3).toString('hex'), kind }
+    if (a.command) pendingRuns.set(tab.id, a.command)
+    broadcast({ t: 'open_space', cmd: { id: spaceRef, repoId: r.id, cwd, label, kind, tab } })
     return { content: [{ type: 'text', text: `opening space “${label}” → ${cwd} (spaceRef: ${spaceRef})` }], structuredContent: { spaceRef, cwd, label } }
   })
 
@@ -2142,12 +2166,16 @@ function buildMcpServer(role, caller) {
     description: 'Add a tab to a space you already opened with open_space. Pass the spaceRef that open_space returned.',
     inputSchema: {
       spaceRef: z.string().describe('The spaceRef returned by open_space.'),
-      tab: z.enum(['claude', 'shell', 'codex']).optional().describe('Kind of the new tab (default claude).')
+      tab: z.enum(['claude', 'shell', 'codex']).optional().describe('Kind of the new tab (default claude; shell when command is given).'),
+      command: z.string().optional().describe('A shell command the new tab starts running, for the USER — e.g. a dev server or a build. Opens a shell tab.')
     }
-  }, async ({ spaceRef, tab }) => {
+  }, async ({ spaceRef, tab, command }) => {
     if (!hasBrowser()) return bad('no cockpit browser tab is connected — cannot add a tab')
-    broadcast({ t: 'add_tab', spaceRef, kind: tab || 'claude' })
-    return ok(`adding ${tab || 'claude'} tab to ${spaceRef}`)
+    if (command && tab && tab !== 'shell') return bad('command runs in a shell tab — drop tab or pass tab: "shell"')
+    const kind = command ? 'shell' : tab || 'claude', t = { id: randomBytes(3).toString('hex'), kind }
+    if (command) pendingRuns.set(t.id, command)
+    broadcast({ t: 'add_tab', spaceRef, kind, tab: t })
+    return ok(`adding ${kind} tab to ${spaceRef}${command ? ' running: ' + command : ''}`)
   })
 
   if (full) srv.registerTool('close_space', {

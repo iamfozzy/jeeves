@@ -43,7 +43,8 @@ Launched by the cockpit, this main loop session gains MCP tools named `mcp__cock
 in a plain terminal session, no cockpit), they're absent. They can also arrive **deferred** —
 listed by name only, uncallable until loaded — so at launch load them with `ToolSearch`
 (`select:mcp__cockpit__dispatch,mcp__cockpit__close_work,mcp__cockpit__inbox,mcp__cockpit__surface_render,mcp__cockpit__write_state`;
-the space and config tools when you first need them). They're absent only when that search finds
+the space and config tools when you first need them), and again in one call after any `/compact`
+or restart. They're absent only when that search finds
 nothing; a tool you can't see in your list is not a missing one. Present → use them; absent → do
 exactly what this brief describes for headless (Task dispatch, in-process returns, terminal-only
 report). The dispatch, report-back, and surface sections below all point back here rather than
@@ -54,6 +55,11 @@ opens a terminal in a repo — pass the repo plus one of branch / pr / path (or 
 checkout), and it returns a `spaceRef`. Use that ref with `add_tab` (add a claude/shell/codex tab)
 or `close_space` (close what you opened). Reach for these to set the user up to investigate
 something — e.g. open the PR's branch so they can poke at it — never to do work yourself.
+Something for the user to run or try (a dev server, a build, a port that's in use) → `open_space`
+or `add_tab` with `command` (e.g. `"yarn install && yarn dev --port 7173"`, the port exactly as
+they said), in the worktree it belongs to; the shell tab runs it where they can watch. If a live
+worker owns that worktree, ask the worker with `SendMessage` instead. Never run package scripts,
+`lsof`, `ps` or `kill` yourself.
 
 When the user asks you to add, change, or drop a project (or set its review command or worktree
 seed files), use those config tools — don't hand-edit `project.md`. `create_project` takes the id,
@@ -214,11 +220,15 @@ returned.
    line. Use the *How to report* shape.
 5. **Write only the ledgers that changed** (*State ledger*). A tick that changed nothing writes
    nothing.
-6. **Reschedule** — call `ScheduleWakeup` with the same `/loop` prompt, `delaySeconds` = the
+6. **Reschedule** — call `ScheduleWakeup` with prompt exactly `Jeeves tick — run the BRIEF tick
+   for the loaded project set` (no `/loop` prefix — that reloads the loop skill every tick), `delaySeconds` = the
    defaults' `tick seconds` (unset → 300), `tick mid-flight seconds` (→ 120) while a `work` row is
    running, `tick overnight seconds` (→ 1800) inside `overnight` (→ `22:00-08:00`, local time) —
    shortened so it fires by the next reminder's due time (*Reminders*), `noop: true` on a quiet
-   tick. Every tick ends with this, quiet or not. A turn the user or a worker message triggered
+   tick. Every tick ends with this, quiet or not — issued with your last tool calls, before your
+   one line; no text after it, and never announce the next tick's time. After any `/compact` or
+   restart, re-read *Each tick* before the next one: its queries are verbatim — never rebuild them
+   from memory or trim their fields. A turn the user or a worker message triggered
    doesn't replace a tick: if no wakeup is pending, schedule one before you finish. No `ScheduleWakeup` tool → the loop was
    never entered: invoke the `loop` skill as `/jeeves:start` step 4 says, then schedule.
 
@@ -462,6 +472,7 @@ covers plan stories, reviews, resolves, verification, the user's own agents, and
 |---|---|
 | Change code: a story, a fix, anything that ends in a PR | `story-worker` |
 | Address review feedback on the user's own PR | `review-resolver` |
+| Merge conflicts or a red build on an existing PR branch | `story-worker`, on that `branch`, told to push to it and not open a PR |
 | Look into something — a failing check, a review thread, a bug, "why is X" | `investigator` |
 | Check a worker's pushed result | `loop-verifier` |
 | Review a teammate's PR / plan a ticket | `reviewer` / `planner` (labels; the prompt carries the role) |
@@ -477,7 +488,13 @@ with the session. Headless, Task is the fallback — and even then run the plugi
 verification and diagnosis — they run on the worker Opus. Pass `model: "sonnet"` for mechanical
 jobs: fetching a log, listing failing checks, gathering facts with no judgement in them. An
 investigator dispatch is usually one or the other; say which in its prompt. An ad-hoc dispatch is tracked, verified and reported like any other
-(*Dispatching workers*). A read-only lookup you can do yourself (a file, a query) needs no agent.
+(*Dispatching workers*). Only the metadata calls and own-file reads listed above need no agent;
+a repo file is never one of them.
+
+**Follow-ups go to the worker that did the work.** While its session is alive (`ListAgents`),
+send the user's follow-up to it with `SendMessage` — never edit its worktree, never dispatch a
+second worker onto it (`dispatch` refuses a branch a live worker holds). Once it's gone, dispatch
+a fresh one on the same `branch`; a clean worktree is reused.
 
 ## Jeeves suggests — you initiate
 Jeeves never starts real work off its own back. It detects the trigger, surfaces it under
@@ -490,7 +507,9 @@ launchers:
   agents*).
 
 Once flagged, don't re-flag the same item every tick — its ledger row records the flag; surface it
-only while it's still waiting. Approving a plan is itself the initiation for that plan's work: once
+only while it's still waiting. Only `approve <TICKET>` (or "approve" on the ticket) approves a
+plan; anything else that sounds like a go-ahead (`implement`, "build it") → ask once. Approving a
+plan is itself the initiation for that plan's work: once
 approved, Jeeves dispatches its stories without asking again (still bound by the merge and verdict
 gates in *Guardrails*). Everything else Jeeves may do unattended is downstream of one of these —
 it opens no plan, review, or resolve that you didn't ask for.
@@ -547,8 +566,8 @@ it opens no plan, review, or resolve that you didn't ask for.
   cockpit*): it addresses the actionable feedback, pushes to the PR branch, and reports a map of
   `thread-id → "fixed in <sha>"` (+ which to leave open and why) — via `report()` under the
   cockpit, or as its Task return otherwise. Subagents can't write to GitHub — so the **loop** posts
-  the replies and resolves those threads via `gh api graphql`, once CI is green and the fixes are
-  verified in the tree. Same pattern for any subagent that needs a GitHub write: agent decides,
+  the replies and resolves those threads via `gh api graphql`, once CI is green and
+  `loop-verifier` has approved the fixes. Same pattern for any subagent that needs a GitHub write: agent decides,
   loop posts. Park anything ambiguous.
 
 ## Custom agents
@@ -591,7 +610,7 @@ the plugin's built-in.
 - **Verify what leaves the repo.** After a worker pushes or opens a PR, hand its result to
   `loop-verifier` — dispatched the same cockpit-or-Task way (*Running under the cockpit*) — before
   telling the user it's done, and relay its pass/fail. It never fixes; on a reject, park it and
-  tell them. Skip it for trivial in-house changes.
+  tell them. No PR is reported done or ready to test before its verdict is relayed.
 - **Park on failure.** A worker that reports blocked/failed → park it under NEEDS YOU (an `ask`
   row) with the reason. Don't silently re-dispatch.
 
@@ -644,12 +663,12 @@ Unless the defaults' `daily summary` is `off`: the first tick after `daily summa
   notifications` nor the trigger's own field (`notify reminders` / `notify worker finished` /
   `notify review ready`) is `off` — unset means on.
 - **Work silently.** Never narrate process, recite guardrails, or announce a tool call or a state
-  write — just do it and report the result. The chat carries outcomes, not a play-by-play.
+  write — just do it and report the result. The chat carries outcomes, not a play-by-play: no
+  "now updating…", "let's…", "next tick at…", and nothing the dashboard already shows.
 - Model match: reasoning/review → opus, mechanical → sonnet, summaries → haiku; both code workers
   default to opus. **"Opus" means Opus 5.5 (`claude-opus-5-5`).** Under the cockpit, `dispatch`
   pins any opus to its configured worker Opus (5.5 unless changed), so leave `model` off. Via the
   Task tool, **don't pass a `model` override for an opus agent** — its frontmatter pins 5.5;
   override only to `sonnet` for mechanical work.
 - **Run the loop itself on Sonnet at medium effort** (under the cockpit, whatever its Settings
-  launch it with) — a tick is orchestration; the deep reasoning lives in the dispatched agents. Bump to opus only for a hard call the loop makes itself (e.g.
-  authoring a plan page inline).
+  launch it with) — a tick is orchestration; the deep reasoning lives in the dispatched agents.

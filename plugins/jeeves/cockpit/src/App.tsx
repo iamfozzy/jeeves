@@ -109,7 +109,7 @@ export function App() {
       if (!repo) continue
       openedCmds.current.add(c.id)
       if (spaces.some((s) => s.openId === c.id)) continue // another browser opened it
-      openSpace(repo, c.cwd, c.label, c.kind, true, c.id)
+      openSpace(repo, c.cwd, c.label, c.kind, true, c.id, c.tab)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openCmds, repos])

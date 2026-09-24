@@ -65,9 +65,13 @@ lifecycle hooks (`SessionStart`, `UserPromptSubmit`, `Notification`, `Stop`, `Se
 browser's colour scheme (the variant of the user's Claude Code theme — `dark-ansi` becomes
 `light-ansi` in a light UI). Workers and claude tabs also get an inline `--mcp-config` for `/mcp`
 with their role and `sid`, which gives them the [child-tab tools](#child-tabs). The orchestrator
-also gets a `PreToolUse` hook (`bin/guard-orchestrator.mjs`) that refuses Edit/Write on any file
-outside the data home and the temp dir (code is a dispatched worker's job), and on
-`<data-home>/projects/*/state.md` and `reminders.md` (written with `write_state`). The hooks drive the status dots (working · awaiting · idle · exited)
+also gets a `PreToolUse` hook (`bin/guard-orchestrator.mjs`) that keeps it an orchestrator. It
+refuses Edit/Write outside the data home and the temp dir, and on `<data-home>/projects/*/state.md`
+and `reminders.md` (written with `write_state`); Read/Grep/Glob outside its own files (the data
+home, the plugin, the temp dir, a worker's `JEEVES_REPORT.md`); Agent/Task (agents run through
+`dispatch`); and any Bash command off an allowlist — `gh` metadata and the PR writes the loop
+posts, `git fetch`/`log`/`rev-parse` and other read-only git, listing anywhere, and read-only
+text tools on its own files. A command it can't parse is refused. The hooks drive the status dots (working · awaiting · idle · exited)
 and let the server follow the live session id across `/clear` and `/resume`, so a respawn resumes
 the current conversation. A worker's `report` outcome (done / blocked / error) sticks; hooks never
 overwrite it.
@@ -145,7 +149,7 @@ the cockpit), none exist and the loop falls back to Task dispatch and terminal o
 | Tool | Contract |
 |---|---|
 | `surface_render` | Paints the dashboard. Row sections `stories` · `myPrs` · `qa` · `reviews`, plus `inFlight` and `quiet`. Applied in order: a full section replaces that section whole (`[]` clears it; an omitted one is left as is); `upsert: { <section>: [rows] }` replaces each row with the same identity or appends it; `remove: { <section>: [ids] }` deletes by identity. Identity is `<repo>#<number>` for `myPrs` / `reviews` (from `number`, else a leading `#123` in `item`) and `<repo>:<KEY>` for `stories` / `qa` (from `key`, else a leading Jira key); the repo tag matches by id, `owner/name` or bare name. `inFlight` and `quiet` are full-replace only. Returns per-section row counts plus rejected rows (no identity) and remove ids that matched nothing. Rows carry `dot` (`red` · `yellow` · `green` · `white`) and `actions` (`{ label, run }` sends `run` to the orchestrator; `type: true` types it without submitting; `{ label, href }` opens a link). Reminders aren't painted: the server watches `reminders.md` and pushes every row to the dashboard over `/events`. |
-| `dispatch` | `{ agent, repo, prompt, ticket?, branch?, model? }` → `{ workId, sid, cwd, branch }`. Branch defaults to `<agent>-<ticket>`. An `agent` naming an agent file runs the session as it ([Workers](#workers)); the description lists the built-in and user agents with their descriptions, read when each MCP session starts. |
+| `dispatch` | `{ agent, repo, prompt, ticket?, branch?, model? }` → `{ workId, sid, cwd, branch }`. Branch defaults to `<agent>-<ticket>`. An `agent` naming an agent file runs the session as it ([Workers](#workers)); the description lists the built-in and user agents with their descriptions, read when each MCP session starts. A branch that already has a worktree reuses it (clearing a stale `JEEVES_REPORT.md`) unless a live worker holds it or it has uncommitted changes — then it errors and says why. |
 | `report` | `{ workId, status?, summary, pr?, verdict?, threads? }` — a worker's result. |
 | `inbox` | Drains unacknowledged reports (`peek: true` leaves them). |
 | `close_work` | `{ workId, removeWorktree?, force? }` — ends the worker's session, optionally removes its worktree, drops it from the bus. |
@@ -153,8 +157,8 @@ the cockpit), none exist and the loop falls back to Task dispatch and terminal o
 | `create_project` | `{ id, repo, path?, baseBranch?, jiraKey?, reviewCommand?, seedFiles? }` — writes a minimal `project.md` and starts tracking it live. Fails if the id exists. |
 | `update_project` | `{ id, reviewCommand?, seedFiles? }` — frontmatter only; an empty value or one equal to the default removes the override. |
 | `delete_project` | `{ id }` — moves the project folder to `projects/.trash/`; checkouts untouched. |
-| `open_space` | `{ repo, branch? \| pr? \| path?, tab?, label? }` — opens a space in the browser for the user (a branch's worktree, reused or created; a PR's head branch; an existing worktree; or the main checkout) and returns a `spaceRef`. Refuses when no browser tab is connected. |
-| `add_tab` / `close_space` | `{ spaceRef, tab? }` / `{ spaceRef }` — adds a tab to, or closes, a space `open_space` opened. `close_space` never removes a worktree. |
+| `open_space` | `{ repo, branch? \| pr? \| path?, tab?, command?, label? }` — opens a space in the browser for the user (a branch's worktree, reused or created; a PR's head branch; an existing worktree; or the main checkout) and returns a `spaceRef`. `command` opens a shell tab that runs it once the shell first prints (on that tab's first spawn only). Refuses when no browser tab is connected. |
+| `add_tab` / `close_space` | `{ spaceRef, tab?, command? }` / `{ spaceRef }` — adds a tab to, or closes, a space `open_space` opened. `close_space` never removes a worktree. |
 | `open_tab` | Child tab. `{ tab: claude \| codex, prompt, title? }` → `{ tabRef, result }`. Opens a tab in the caller's worktree, started on `prompt` plus an instruction to write its result to `result`. |
 | `wait_tab` | Child tab. `{ tabRef, timeoutSec? }` — blocks (default 240 s, max 600) until the child's result file appears, then returns it. `pending` on timeout; `exited` if the child ended without one. |
 | `send_tab` | Child tab. `{ tabRef, text }` — deletes the previous result and types a follow-up into the child (bracketed paste, then Enter). |

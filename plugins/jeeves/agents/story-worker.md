@@ -18,7 +18,9 @@ Then:
 4. Implement the story. If the requirement is genuinely ambiguous, stop and report the question back —
    don't guess on anything hard to reverse.
 5. Run the repo's tests and linters. Fix what you break; don't leave it.
-6. Commit on a task branch and open a PR with `gh pr create` — clear title, what-and-why body.
+6. Commit on a task branch and open a PR with `gh pr create` — clear title, what-and-why body. If your
+   prompt names an existing PR's branch (a merge conflict, a red build, a follow-up), commit and push to that
+   branch instead — don't open a new PR.
 
 Do not merge. Do not touch other stories' worktrees. If the `mcp__cockpit__report` tool is
 available, call it with `{ workId (from your system prompt), status: "done"|"blocked"|"error",

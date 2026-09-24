@@ -169,7 +169,7 @@ export type WorkerSpace = {
 }
 
 // Command from the orchestrator (open_space tool) telling the UI to open a space.
-export type OpenSpaceCmd = { id: string; repoId: string; cwd: string; label: string; kind: TabKind }
+export type OpenSpaceCmd = { id: string; repoId: string; cwd: string; label: string; kind: TabKind; tab?: Tab } // tab: its id is fixed so a pending command finds it
 // add_tab / close_space, targeting a space by the spaceRef open_space returned, or
 // (open_tab from a claude tab) by the space's own id. `tab` fixes the new tab's id,
 // which the server's pending launch is keyed by; `open` opens the space (borrowed,
