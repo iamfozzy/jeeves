@@ -7,7 +7,7 @@ import { Picker, type PickItem } from './Picker'
 import { Settings } from './Settings'
 import { SpaceView } from './SpaceView'
 import { OrchestratorView } from './OrchestratorView'
-import { OpenSpaceModal } from './OpenSpaceModal'
+import { OpenFolderModal, OpenSpaceModal } from './OpenSpaceModal'
 import { TerminalPane } from './TerminalPane'
 import { SpacePanel } from './SpacePanel'
 import { closeWork, deleteWorktree, getConfig, getGit, getHealth, getLayout, killSession, restartOrchestrator, saveLayout } from './api'
@@ -68,6 +68,7 @@ export function App() {
   const [activeSpaceId, setActiveSpaceId] = useState<string>(() => loadLayout().activeSpaceId)
   const [gitBySpace, setGitBySpace] = useState<Record<string, GitInfo>>({})
   const [openRepo, setOpenRepo] = useState<RepoCfg | null>(null)
+  const [openFolder, setOpenFolder] = useState(false)
   const [closingWorker, setClosingWorker] = useState<WorkerSpace | null>(null)
   const [closeErr, setCloseErr] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
@@ -105,11 +106,11 @@ export function App() {
   useEffect(() => {
     for (const c of openCmds) {
       if (openedCmds.current.has(c.id)) continue
-      const repo = repos.find((r) => r.id === c.repoId)
-      if (!repo) continue
+      const repo = c.repoId ? repos.find((r) => r.id === c.repoId) : null // '' = a folder space
+      if (c.repoId && !repo) continue
       openedCmds.current.add(c.id)
       if (spaces.some((s) => s.openId === c.id)) continue // another browser opened it
-      openSpace(repo, c.cwd, c.label, c.kind, true, c.id, c.tab)
+      openSpace(repo ?? null, c.cwd, c.label, c.kind, true, c.id, c.tab)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openCmds, repos])
@@ -126,8 +127,8 @@ export function App() {
       if (ranSpaceCmds.current.has(c.id)) continue
       const target = c.spaceId === SCRATCH ? scratch : spaces.find((s) => (c.spaceId ? s.id === c.spaceId : s.openId === c.spaceRef))
       if (!target) {
-        const repo = c.open && repos.find((r) => r.id === c.open!.repoId)
-        if (c.t !== 'add_tab' || !c.open || !repo || !c.spaceRef || opening.has(c.spaceRef)) continue
+        const repo = c.open && (c.open.repoId ? repos.find((r) => r.id === c.open!.repoId) : null)
+        if (c.t !== 'add_tab' || !c.open || repo === undefined || !c.spaceRef || opening.has(c.spaceRef)) continue
         ranSpaceCmds.current.add(c.id)
         opening.add(c.spaceRef)
         openSpace(repo, c.open.cwd, c.open.label, c.kind ?? 'claude', true, c.spaceRef, c.tab, false)
@@ -221,12 +222,13 @@ export function App() {
 
   // `first` fixes the first tab (a server-launched child tab); focus=false opens
   // the space without switching to it.
-  function openSpace(repo: RepoCfg, cwd: string, label: string, kind: TabKind = 'shell', borrowed = false, openId?: string, first?: Tab, focus = true) {
+  // `repo` null opens a folder space: any folder, no repo, git panel only if it's a git repo.
+  function openSpace(repo: RepoCfg | null, cwd: string, label: string, kind: TabKind = 'shell', borrowed = false, openId?: string, first?: Tab, focus = true) {
     const dup = spaces.filter((s) => s.name === label || s.name.startsWith(label + ' ·')).length
     const tab = first ?? { id: rid(), kind }
     const space: Space = {
       id: rid(),
-      repoId: repo.id,
+      repoId: repo?.id ?? '',
       name: dup ? `${label} · ${dup + 1}` : label,
       cwd,
       tabs: [tab],
@@ -236,7 +238,7 @@ export function App() {
     }
     setSpaces((s) => [...s, space])
     if (focus) setActiveSpaceId(space.id)
-    setRecent((r) => [repo.id, ...r.filter((x) => x !== repo.id)].slice(0, 50))
+    if (repo) setRecent((r) => [repo.id, ...r.filter((x) => x !== repo.id)].slice(0, 50))
   }
 
   // Picker rows: every repo (recently opened first, then by slug) opens the
@@ -257,8 +259,8 @@ export function App() {
       { key: SCRATCH, group: 'Go to', label: 'Scratchpad', sub: 'home · terminals', match: 'scratchpad home terminals', onPick: () => setActiveSpaceId(SCRATCH) },
       ...spaces.map((s) => ({
         key: 'space:' + s.id, group: 'Spaces', label: s.name,
-        sub: `${slug(s.repoId)} · ${gitBySpace[s.id]?.branch ?? '…'}`,
-        match: `${s.name} ${slug(s.repoId)} ${gitBySpace[s.id]?.branch ?? ''}`,
+        sub: s.repoId ? `${slug(s.repoId)} · ${gitBySpace[s.id]?.branch ?? '…'}` : s.cwd,
+        match: `${s.name} ${s.repoId ? slug(s.repoId) : s.cwd} ${gitBySpace[s.id]?.branch ?? ''}`,
         dot: spaceDot(s, sessions).color, onPick: () => setActiveSpaceId(s.id)
       })),
       ...workers.map((w) => ({
@@ -321,7 +323,7 @@ export function App() {
   // borrowed one (investigating a worker's worktree), a dispatched worker's (however
   // it was opened) or the repo's main checkout.
   function ownsWorktree(sp: Space) {
-    return !sp.borrowed && !workers.some((w) => w.cwd === sp.cwd) && sp.cwd !== repos.find((r) => r.id === sp.repoId)?.path
+    return !!sp.repoId && !sp.borrowed && !workers.some((w) => w.cwd === sp.cwd) && sp.cwd !== repos.find((r) => r.id === sp.repoId)?.path
   }
 
   // Close a space, deleting its worktree first when asked. Returns the server's
@@ -417,6 +419,7 @@ export function App() {
             onTogglePin={togglePin}
             onOpenPicker={() => setPicker({ mode: 'repos', open: true })}
             onOpenSpaceRequest={setOpenRepo}
+            onOpenFolderRequest={() => setOpenFolder(true)}
             onSelectSpace={(id) => { setActiveSpaceId(id); closeNav() }}
             ownsWorktree={ownsWorktree}
             onCloseSpace={closeSpace}
@@ -455,6 +458,7 @@ export function App() {
             <div key={s.id} style={{ position: 'absolute', inset: 0, display: s.id === activeSpaceId ? 'block' : 'none' }}>
               <SpaceView
                 space={s}
+                panel={!!s.repoId || !!gitBySpace[s.id]?.git}
                 spaceActive={s.id === activeSpaceId}
                 panelOpen={panelOpen}
                 onTogglePanel={togglePanel}
@@ -492,6 +496,9 @@ export function App() {
       placeholder={picker.mode === 'switch' ? 'Jump to a space, worker or repo…' : 'Open a space in… (type to filter repos)'}
       items={pickerItems()}
     />
+    {openFolder && (
+      <OpenFolderModal onClose={() => setOpenFolder(false)} onOpen={(cwd, label, kind) => { openSpace(null, cwd, label, kind); setOpenFolder(false) }} />
+    )}
     {openRepo && (
       <OpenSpaceModal
         repo={openRepo}

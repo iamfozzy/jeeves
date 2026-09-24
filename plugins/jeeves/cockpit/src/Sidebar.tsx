@@ -153,6 +153,8 @@ function HomeRow({ active, onClick, title, lead, right }: {
   )
 }
 
+const FOLDERS = '~folders' // the Folders group's key in the collapsed map (never a repo id)
+
 export function Sidebar({
   repos,
   spaces,
@@ -170,6 +172,7 @@ export function Sidebar({
   onTogglePin,
   onOpenPicker,
   onOpenSpaceRequest,
+  onOpenFolderRequest,
   onSelectSpace,
   ownsWorktree,
   onCloseSpace,
@@ -192,6 +195,7 @@ export function Sidebar({
   onTogglePin: (repoId: string) => void
   onOpenPicker: () => void
   onOpenSpaceRequest: (repo: RepoCfg) => void
+  onOpenFolderRequest: () => void
   onSelectSpace: (id: string) => void
   ownsWorktree: (s: Space) => boolean
   onCloseSpace: (id: string, worktree: 'keep' | 'delete' | 'force') => Promise<string | null>
@@ -219,6 +223,64 @@ export function Sidebar({
     })
     .filter((r) => r.isPinned || r.repoSpaces.length || r.repoWorkers.length)
     .sort((a, b) => Number(b.isPinned) - Number(a.isPinned) || a.band - b.band || a.repo.slug.localeCompare(b.repo.slug))
+  // One space row: status dot · branch (or name) · changes · ↑/↓, with details and close.
+  // `where` is its repo's slug, or a folder space's path.
+  const spaceRow = (s: Space, where: string) => {
+    const git = gitBySpace[s.id]
+    const active = s.id === activeSpaceId
+    const dot = spaceDot(s, sessionStatus)
+    // The branch, or the space name when there's no git.
+    const title = (git?.git && git.branch) || s.name
+    const state = git?.git ? gitState(git) : null
+    const tabKinds = s.tabs.map((t) => t.kind).join(', ')
+    // One line: status dot · branch · uncommitted-file count · ↑/↓; the rest behind the ? button.
+    return (
+      <UnstyledButton
+        key={s.id}
+        className="ck-space"
+        data-active={active}
+        onClick={() => onSelectSpace(s.id)}
+        style={{ padding: '7px 12px', ...(active ? { background: 'var(--ck-active)' } : {}) }}
+      >
+        <Group gap={9} wrap="nowrap">
+          <Box style={{ width: 14, display: 'flex', justifyContent: 'center', flex: 'none' }}>
+            <Box
+              w={7} h={7}
+              style={{
+                borderRadius: '50%', flex: 'none', boxSizing: 'border-box',
+                ...(dot.label ? { background: dot.color } : { background: 'transparent', border: '1.5px solid var(--mantine-color-gray-6)' })
+              }}
+            />
+          </Box>
+          <Text size="sm" fw={600} lh={1.25} truncate style={{ minWidth: 0 }}>{title}</Text>
+          {state?.dirty && git ? <ChangedPill n={git.changed} /> : null}
+          <Box style={{ flex: 1 }} />
+          {state?.sync ? <Text size="xs" c="dimmed" className="ck-num" style={{ flex: 'none' }}>{state.sync}</Text> : null}
+          <Group gap={6} wrap="nowrap" style={{ flex: 'none' }}>
+          <DetailsButton label="Space details">
+            <Box>
+              <Text size="xs" c="dimmed" mb={2}>{where}</Text>
+              <Text size="sm" fw={600} lh={1.4} style={{ wordBreak: 'break-word' }}>{title}</Text>
+            </Box>
+            <CardField label={s.repoId ? 'Worktree' : 'Folder'}><Text size="xs" ff="monospace" style={{ wordBreak: 'break-all' }}>{s.cwd}</Text></CardField>
+            {git ? (
+              <CardField label="Git">
+                <Text size="sm">{!git.git ? 'not a git worktree' : state ? state.tooltip : 'clean and in sync'}</Text>
+              </CardField>
+            ) : null}
+            <CardField label="Claude"><Text size="sm">{dot.label ?? 'no claude session'}</Text></CardField>
+            <CardField label="Tabs"><Text size="sm">{s.tabs.length ? `${s.tabs.length} · ${tabKinds}` : 'None'}</Text></CardField>
+          </DetailsButton>
+          <CloseConfirm opened={confirmId === s.id} onChange={(o) => setConfirmId(o ? s.id : null)} label="Close space" size={20}>
+            <SpaceCloseBody space={s} title={title} ownsWorktree={ownsWorktree(s)}
+              onCancel={() => setConfirmId(null)} onClose={(wt) => onCloseSpace(s.id, wt)} />
+          </CloseConfirm>
+          </Group>
+        </Group>
+      </UnstyledButton>
+    )
+  }
+  const folders = spaces.filter((s) => !s.repoId)
   const mod = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘P' : 'Ctrl+P'
   // When every configured repo shares an owner, headers drop it (it's noise);
   // otherwise the full slug disambiguates.
@@ -258,6 +320,24 @@ export function Sidebar({
       {repos.length === 0 ? (
         <Box px="sm" py="sm"><Text size="xs" c="dimmed">No repos configured. Run <Text span ff="monospace">/jeeves:setup</Text> in a Claude session.</Text></Box>
       ) : null}
+      {/* Folder spaces: any folder, no repo — for work that isn't a configured project. */}
+      <Box>
+        <Group gap={6} wrap="nowrap" px="sm" py={7} className="ck-proj" onClick={() => toggle(FOLDERS)}>
+          <Box style={{ display: 'flex', flex: 'none', marginRight: 3, color: 'var(--mantine-color-dimmed)' }}>
+            {!collapsed[FOLDERS] && folders.length ? <IconFolderOpen size={14} stroke={2} /> : <IconFolder size={14} stroke={2} />}
+          </Box>
+          <Text size="xs" fw={600} style={{ letterSpacing: '.01em', color: 'var(--ck-repo)', flex: 1, minWidth: 0 }} truncate>Folders</Text>
+          {collapsed[FOLDERS] && folders.length ? <Badge size="xs" variant="light" color="gray" style={{ flex: 'none' }}>{folders.length}</Badge> : null}
+          <Tooltip label="Open a folder" openDelay={400} withArrow>
+            <ActionIcon size={20} variant="subtle" color="gray" onClick={(e) => { e.stopPropagation(); onOpenFolderRequest() }} aria-label="Open folder" style={{ flex: 'none' }}>
+              <IconPlus size={14} stroke={2.2} />
+            </ActionIcon>
+          </Tooltip>
+        </Group>
+        <Collapse in={!collapsed[FOLDERS] && folders.length > 0}>
+          <Stack gap={0}>{folders.map((s) => spaceRow(s, s.cwd))}</Stack>
+        </Collapse>
+      </Box>
       {visible.map(({ repo, repoSpaces, repoWorkers, isPinned }) => {
         const isCollapsed = !!collapsed[repo.id]
         return (
@@ -304,61 +384,7 @@ export function Sidebar({
 
             <Collapse in={!isCollapsed && repoSpaces.length > 0}>
                   <Stack gap={0}>
-                    {repoSpaces.map((s) => {
-                      const git = gitBySpace[s.id]
-                      const active = s.id === activeSpaceId
-                      const dot = spaceDot(s, sessionStatus)
-                      // The branch, or the space name when there's no git.
-                      const title = (git?.git && git.branch) || s.name
-                      const state = git?.git ? gitState(git) : null
-                      const tabKinds = s.tabs.map((t) => t.kind).join(', ')
-                      // One line: status dot · branch · uncommitted-file count · ↑/↓; the rest behind the ? button.
-                      return (
-                        <UnstyledButton
-                          key={s.id}
-                          className="ck-space"
-                          data-active={active}
-                          onClick={() => onSelectSpace(s.id)}
-                          style={{ padding: '7px 12px', ...(active ? { background: 'var(--ck-active)' } : {}) }}
-                        >
-                          <Group gap={9} wrap="nowrap">
-                            <Box style={{ width: 14, display: 'flex', justifyContent: 'center', flex: 'none' }}>
-                              <Box
-                                w={7} h={7}
-                                style={{
-                                  borderRadius: '50%', flex: 'none', boxSizing: 'border-box',
-                                  ...(dot.label ? { background: dot.color } : { background: 'transparent', border: '1.5px solid var(--mantine-color-gray-6)' })
-                                }}
-                              />
-                            </Box>
-                            <Text size="sm" fw={600} lh={1.25} truncate style={{ minWidth: 0 }}>{title}</Text>
-                            {state?.dirty && git ? <ChangedPill n={git.changed} /> : null}
-                            <Box style={{ flex: 1 }} />
-                            {state?.sync ? <Text size="xs" c="dimmed" className="ck-num" style={{ flex: 'none' }}>{state.sync}</Text> : null}
-                            <Group gap={6} wrap="nowrap" style={{ flex: 'none' }}>
-                            <DetailsButton label="Space details">
-                              <Box>
-                                <Text size="xs" c="dimmed" mb={2}>{repo.slug}</Text>
-                                <Text size="sm" fw={600} lh={1.4} style={{ wordBreak: 'break-word' }}>{title}</Text>
-                              </Box>
-                              <CardField label="Worktree"><Text size="xs" ff="monospace" style={{ wordBreak: 'break-all' }}>{s.cwd}</Text></CardField>
-                              {git ? (
-                                <CardField label="Git">
-                                  <Text size="sm">{!git.git ? 'not a git worktree' : state ? state.tooltip : 'clean and in sync'}</Text>
-                                </CardField>
-                              ) : null}
-                              <CardField label="Claude"><Text size="sm">{dot.label ?? 'no claude session'}</Text></CardField>
-                              <CardField label="Tabs"><Text size="sm">{s.tabs.length ? `${s.tabs.length} · ${tabKinds}` : 'None'}</Text></CardField>
-                            </DetailsButton>
-                            <CloseConfirm opened={confirmId === s.id} onChange={(o) => setConfirmId(o ? s.id : null)} label="Close space" size={20}>
-                              <SpaceCloseBody space={s} title={title} ownsWorktree={ownsWorktree(s)}
-                                onCancel={() => setConfirmId(null)} onClose={(wt) => onCloseSpace(s.id, wt)} />
-                            </CloseConfirm>
-                            </Group>
-                          </Group>
-                        </UnstyledButton>
-                      )
-                    })}
+                    {repoSpaces.map((s) => spaceRow(s, repo.slug))}
                   </Stack>
             </Collapse>
           </Box>

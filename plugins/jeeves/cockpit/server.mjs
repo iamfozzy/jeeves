@@ -3,7 +3,7 @@ import os from 'node:os'
 import { readFile, writeFile, unlink } from 'node:fs/promises'
 import { existsSync, readFileSync, readdirSync, copyFileSync, mkdirSync, renameSync, statSync, unlinkSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, join, extname, normalize, basename, sep } from 'node:path'
+import { dirname, join, extname, normalize, basename, resolve, sep } from 'node:path'
 import { createRequire } from 'node:module'
 import { execFile, execFileSync } from 'node:child_process'
 import { randomBytes, timingSafeEqual, randomUUID, createHash } from 'node:crypto'
@@ -792,6 +792,27 @@ function allowedCwd(cwd) {
   const n = normalize(cwd)
   return inRoots(ROOTS, n) || inRoots(dynRoots, n)
 }
+// A folder space's directory: a typed path (~ expanded) that exists and is inside the
+// allowed roots, or { error }.
+function folderFor(raw) {
+  const p = resolve(expandHome(String(raw || '').trim()) || SCRATCH_ROOT)
+  let st; try { st = statSync(p) } catch {}
+  if (!st?.isDirectory()) return { error: 'not a folder: ' + p }
+  if (!allowedCwd(p)) return { error: `outside the folders the cockpit may open (${SCRATCH_ROOT})` }
+  return { path: p, name: basename(p) || p }
+}
+// The folder browser: a folder's subfolders (dot-folders left out) and its parent, when
+// the parent is still inside the allowed roots.
+function folderListing(f) {
+  let dirs = []
+  try {
+    dirs = readdirSync(f.path, { withFileTypes: true })
+      .filter((d) => !d.name.startsWith('.') && (d.isDirectory() || (d.isSymbolicLink() && (() => { try { return statSync(join(f.path, d.name)).isDirectory() } catch { return false } })())))
+      .map((d) => d.name).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })).slice(0, 500)
+  } catch {}
+  const up = dirname(f.path)
+  return { ...f, parent: up !== f.path && allowedCwd(up) ? up : null, dirs }
+}
 
 // The last line of a command's stderr. git's progress ("Updating files: 40%") is
 // carriage-return separated, so split on both.
@@ -1337,6 +1358,10 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'DELETE' && path === '/api/work') {
     const out = await closeWork(url.searchParams.get('workId'), { removeWorktree: url.searchParams.get('worktree') === '1', force: url.searchParams.get('force') === '1' })
     return sendJson(res, out, out.error ? 400 : 200)
+  }
+  if (path === '/api/folder') {
+    const f = folderFor(url.searchParams.get('path'))
+    return sendJson(res, f.error || !url.searchParams.has('list') ? f : folderListing(f), f.error ? 400 : 200)
   }
   if (path === '/api/git') {
     const cwd = url.searchParams.get('cwd')
@@ -2118,9 +2143,9 @@ function buildMcpServer(role, caller) {
   })
 
   if (full) srv.registerTool('open_space', {
-    description: 'Open a cockpit space for the user — a terminal in a worktree. Give the repo plus ONE of: branch (local or origin; reused if a worktree already has it, else created), pr (its head branch is opened), or path (an existing worktree). Omit all three for the repo\'s main checkout. This is for spaces the USER investigates; dispatched work still goes through dispatch.',
+    description: 'Open a cockpit space for the user — a terminal in a worktree, or in any folder. Give the repo plus ONE of: branch (local or origin; reused if a worktree already has it, else created), pr (its head branch is opened), or path (an existing worktree). Omit all three for the repo\'s main checkout. Omit repo and give only path for a folder space — any folder under the home dir, for questions that aren\'t about a configured repo. This is for spaces the USER investigates; dispatched work still goes through dispatch.',
     inputSchema: {
-      repo: z.string().describe('Repo id or slug.'),
+      repo: z.string().optional().describe('Repo id or slug. Omit, with a path, for a folder space.'),
       branch: z.string().optional().describe('Branch to open — local or an origin branch (checked out into a tracking branch).'),
       pr: z.union([z.string(), z.number()]).optional().describe('PR number; its head branch is opened.'),
       path: z.string().optional().describe('Path of an existing worktree to open directly.'),
@@ -2130,11 +2155,15 @@ function buildMcpServer(role, caller) {
     }
   }, async (a) => {
     if (a.command && a.tab && a.tab !== 'shell') return bad('command runs in a shell tab — drop tab or pass tab: "shell"')
-    const r = findRepo(a.repo)
-    if (!r) return bad('unknown repo: ' + a.repo)
+    const r = a.repo ? findRepo(a.repo) : null
+    if (a.repo && !r) return bad('unknown repo: ' + a.repo)
+    if (!r && !a.path) return bad('give a repo, or a path for a folder space')
     let cwd, label = a.label
     try {
-      if (a.path) {
+      if (!r) {
+        const f = folderFor(a.path); if (f.error) return bad(f.error)
+        cwd = f.path; label ||= f.name
+      } else if (a.path) {
         const wt = (await listWorktrees(r)).find((w) => normalize(w.path) === normalize(a.path))
         if (!wt) return bad('no worktree of ' + r.id + ' at path: ' + a.path)
         cwd = wt.path; label ||= wt.branch || basename(wt.path)
@@ -2158,7 +2187,7 @@ function buildMcpServer(role, caller) {
     const spaceRef = 'os' + randomBytes(3).toString('hex')
     const kind = a.command ? 'shell' : a.tab || 'claude', tab = { id: randomBytes(3).toString('hex'), kind }
     if (a.command) pendingRuns.set(tab.id, a.command)
-    broadcast({ t: 'open_space', cmd: { id: spaceRef, repoId: r.id, cwd, label, kind, tab } })
+    broadcast({ t: 'open_space', cmd: { id: spaceRef, repoId: r?.id ?? '', cwd, label, kind, tab } })
     return { content: [{ type: 'text', text: `opening space “${label}” → ${cwd} (spaceRef: ${spaceRef})` }], structuredContent: { spaceRef, cwd, label } }
   })
 

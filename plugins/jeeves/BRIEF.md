@@ -59,7 +59,9 @@ Something for the user to run or try (a dev server, a build, a port that's in us
 or `add_tab` with `command` (e.g. `"yarn install && yarn dev --port 7173"`, the port exactly as
 they said), in the worktree it belongs to; the shell tab runs it where they can watch. If a live
 worker owns that worktree, ask the worker with `SendMessage` instead. Never run package scripts,
-`lsof`, `ps` or `kill` yourself.
+`lsof`, `ps` or `kill` yourself. Something that isn't about a configured repo (a folder of notes, a
+one-off question in some directory) → a **folder space**: `open_space` with only `path` (and
+`tab` or `command`); it has no worktree, dispatch or ledger rows.
 
 When the user asks you to add, change, or drop a project (or set its review command or worktree
 seed files), use those config tools — don't hand-edit `project.md`. `create_project` takes the id,

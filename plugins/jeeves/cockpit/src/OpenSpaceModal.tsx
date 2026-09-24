@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { Alert, Button, Divider, Group, Loader, Modal, Select, Stack, Tabs, Text, TextInput, UnstyledButton } from '@mantine/core'
-import { createWorktree, listBranches, listPRs, listWorktrees } from './api'
-import type { Branches, PR, RepoCfg, Worktree } from './types'
+import { Alert, Button, Divider, Group, Loader, Modal, SegmentedControl, Select, Stack, Tabs, Text, TextInput, UnstyledButton } from '@mantine/core'
+import { createWorktree, listBranches, listPRs, listWorktrees, resolveFolder, type FolderView } from './api'
+import type { Branches, PR, RepoCfg, TabKind, Worktree } from './types'
 
 export function OpenSpaceModal({
   repo,
@@ -173,6 +173,70 @@ export function OpenSpaceModal({
 
 function Label({ children }: { children: ReactNode }) {
   return <Text className="ck-label">{children}</Text>
+}
+
+// A folder space: any folder under the home dir, for work that isn't a configured repo.
+// Browse by clicking through folders, or type a path (Enter jumps there); Open takes
+// whatever the path box says.
+export function OpenFolderModal({ onClose, onOpen }: { onClose: () => void; onOpen: (cwd: string, label: string, kind: TabKind) => void }) {
+  const [home, setHome] = useState('')
+  const [view, setView] = useState<FolderView | null>(null)
+  const [path, setPath] = useState('~')
+  const [name, setName] = useState('')
+  const [kind, setKind] = useState<TabKind>('claude')
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const tilde = (p: string) => (home && (p === home || p.startsWith(home + '/')) ? '~' + p.slice(home.length) : p)
+  const go = async (to: string) => {
+    const f = await resolveFolder(to, true).catch((): FolderView => ({ error: 'could not reach the cockpit' }))
+    if (f.error || !f.path) { setError(f.error ?? 'not a folder'); return }
+    setError(null); setView(f); setPath(tilde(f.path))
+  }
+  useEffect(() => {
+    resolveFolder('~', true).then((f) => { if (f.path) { setHome(f.path); setView(f); setPath('~') } }).catch(() => setError('could not reach the cockpit'))
+  }, [])
+  const open = async () => {
+    setBusy(true); setError(null)
+    const f = await resolveFolder(path).catch((): FolderView => ({ error: 'could not reach the cockpit' }))
+    setBusy(false)
+    if (f.error || !f.path) { setError(f.error ?? 'not a folder'); return }
+    onOpen(f.path, name.trim() || f.name || f.path, kind)
+  }
+  const rows = view?.dirs ?? []
+  return (
+    <Modal opened onClose={onClose} centered size="lg" radius="md" title={<Text fw={600}>Open a folder</Text>}>
+      <Stack gap="md">
+        <TextInput label="Folder" description="Click through the folders below, or type a path and press Enter." value={path} data-autofocus
+          onChange={(e) => setPath(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === 'Enter') go(path) }} styles={{ input: { fontFamily: 'monospace' } }} />
+        <div style={{ maxHeight: 280, overflowY: 'auto', border: '1px solid var(--ck-border)', borderRadius: 8 }}>
+          {view === null && !error ? <Group gap="xs" p="sm"><Loader size="xs" /><Text size="xs" c="dimmed">loading…</Text></Group> : null}
+          {view?.parent ? <FolderRow label=".." onClick={() => go(view.parent!)} /> : null}
+          {rows.map((d) => <FolderRow key={d} label={d} onClick={() => go(view!.path + '/' + d)} />)}
+          {view && !rows.length ? <Text size="xs" c="dimmed" p="sm">No folders inside.</Text> : null}
+        </div>
+        <TextInput label="Name" description="Shown in the sidebar; defaults to the folder's name." value={name} onChange={(e) => setName(e.currentTarget.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') open() }} />
+        <Stack gap={6}>
+          <Label>First tab</Label>
+          <SegmentedControl size="xs" value={kind} onChange={(v) => setKind(v as TabKind)}
+            data={[{ value: 'claude', label: 'Claude' }, { value: 'shell', label: 'Terminal' }, { value: 'codex', label: 'Codex' }]} />
+        </Stack>
+        {error && <Alert color="red" variant="light">{error}</Alert>}
+        <Group justify="flex-end"><Button onClick={open} loading={busy}>Open {path.trim() || 'folder'}</Button></Group>
+      </Stack>
+    </Modal>
+  )
+}
+
+function FolderRow({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <UnstyledButton className="ck-space" onClick={onClick} style={{ display: 'block', width: '100%', padding: '6px 12px' }}>
+      <Group gap={8} wrap="nowrap">
+        <Text c="dimmed" style={{ display: 'flex', flex: 'none' }}>{label === '..' ? '↑' : '▸'}</Text>
+        <Text size="sm" ff="monospace" truncate>{label === '..' ? '.. (up)' : label}</Text>
+      </Group>
+    </UnstyledButton>
+  )
 }
 
 function Row({ icon, title, sub, mono, onClick }: { icon: ReactNode; title: string; sub: string; mono?: boolean; onClick: () => void }) {

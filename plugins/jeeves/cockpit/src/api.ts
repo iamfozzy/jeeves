@@ -18,6 +18,12 @@ export async function saveLayout(layout: Layout, from: string): Promise<void> {
   await fetch('/api/layout', { method: 'POST', headers: authHeaders({ 'content-type': 'application/json' }), body: JSON.stringify({ layout, from }) })
 }
 
+// A folder space's directory: a typed path (~ expanded) resolved and checked by the server.
+export type FolderView = { path?: string; name?: string; error?: string; parent?: string | null; dirs?: string[] }
+export function resolveFolder(path: string, list = false): Promise<FolderView> {
+  return getJson('/api/folder?path=' + encodeURIComponent(path) + (list ? '&list=1' : ''))
+}
+
 export function getGit(cwd: string): Promise<GitInfo> {
   return getJson('/api/git?cwd=' + encodeURIComponent(cwd))
 }

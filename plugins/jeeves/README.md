@@ -133,6 +133,10 @@ Jeeves never merges, never posts a review until you pick its verdict, and never 
 - **Open a space** — the repo row's **+**, or **+** on the Spaces header to pick a repo. Choose an
   existing or new branch, an open PR, or an existing worktree. A new branch is cut from the
   project's freshly fetched base branch, and the project's seed files (e.g. `.env`) are copied in.
+- **Folders** — for work that isn't a configured repo: **+** on the Folders group opens any folder
+  under your home directory as a space, with claude, codex or shell tabs. No worktrees, dispatch or
+  dashboard rows; the git panel appears only if the folder is a git repo. Closing one never deletes
+  anything.
 - **⌘P / Ctrl+P** — quick switcher: jump to any space, worker or repo. (Ctrl+P works outside
   terminals only, so it stays previous-command inside them.)
 - **Tabs** — each space holds `claude`, `codex` and shell tabs. Double-click to rename, middle-click

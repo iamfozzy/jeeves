@@ -20,8 +20,8 @@ export function Section({ id, label, icon: Icon, accent, count, right, px = 'md'
     try { const all = load(); if (next) all[id] = true; else delete all[id]; localStorage.setItem(KEY, JSON.stringify(all)) } catch {}
   }
   return (
-    <Box>
-      <Group gap={8} align="center" px={px} py={8} wrap="nowrap" className={collapsible ? 'ck-sechead' : undefined}
+    <Box className="ck-section">
+      <Group gap={8} align="center" px={px} py={8} wrap="nowrap" className={collapsible ? 'ck-sechead ck-sectop' : 'ck-sectop'}
         style={{ background: 'var(--ck-page)' }} onClick={collapsible ? toggle : undefined}
         aria-expanded={collapsible ? !folded : undefined} title={collapsible ? (folded ? `Show ${label.toLowerCase()}` : `Hide ${label.toLowerCase()}`) : undefined}>
         <Box style={{ color: `var(--mantine-color-${accent}-5)`, display: 'flex' }}>

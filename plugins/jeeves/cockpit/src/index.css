@@ -58,6 +58,9 @@ body { background: var(--ck-page); }
 .ck-proj { cursor: pointer; transition: background .1s ease; }
 .ck-proj:hover { background: var(--ck-hover); }
 .ck-sechead { cursor: pointer; user-select: none; }
+/* In the sidebar and the dashboard, every section header but the first carries a top rule,
+   so it reads apart from whatever came before it. */
+:is(.mantine-AppShell-navbar, .ck-orch-dash) .ck-section ~ .ck-section > .ck-sectop { border-top: 1px solid var(--ck-divider); }
 .ck-sechead:hover .ck-label { color: var(--mantine-color-text); }
 /* Changed-file rows in the space git panel. */
 
