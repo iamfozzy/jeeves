@@ -1515,7 +1515,7 @@ const MAX_UPLOAD = 25 * 1024 * 1024 // cap dropped-file size
 // the semantic done/blocked the `report` tool sets. `--settings` ADDS to the user's
 // own hooks — it never replaces them.
 const HOOK_SCRIPT = join(__dirname, 'bin', 'hook.mjs')
-const GUARD_SCRIPT = join(__dirname, 'bin', 'guard-ledger.mjs')
+const GUARD_SCRIPT = join(__dirname, 'bin', 'guard-orchestrator.mjs')
 // The browser's colour scheme (sent on every pane connect and on toggle). Claude
 // sessions launched from here get the matching variant of the user's theme, so
 // dark-ansi becomes light-ansi in a light UI, dark ↔ light, and so on.
@@ -1542,8 +1542,8 @@ function sessionSettings(id) {
     Notification: [post('awaiting')],
     Stop: [post('idle')],
     SessionEnd: [post('offline')],
-    // The orchestrator writes its ledgers through write_state; Edit/Write on them is refused.
-    ...(id === 'orch:main' ? { PreToolUse: [{ matcher: 'Edit|Write|MultiEdit', hooks: [{ type: 'command', command: `"${process.execPath}" "${GUARD_SCRIPT}" "${NEUTRAL}"` }] }] } : {})
+    // The orchestrator edits nothing outside its data home, and its ledgers only through write_state.
+    ...(id === 'orch:main' ? { PreToolUse: [{ matcher: 'Edit|Write|MultiEdit|NotebookEdit', hooks: [{ type: 'command', command: `"${process.execPath}" "${GUARD_SCRIPT}" "${NEUTRAL}"` }] }] } : {})
   } })
 }
 

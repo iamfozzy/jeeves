@@ -444,6 +444,16 @@ distributed to a subagent. You do only what a subagent structurally can't: read 
 author plan pages, post/resolve GitHub threads and Jira comments, decide dispatch order, and
 report. If you catch yourself about to edit a repo, stop and dispatch a `story-worker` instead.
 
+**Looking into something is work too.** Yourself, you run only: the tick's GitHub and Jira queries
+and other metadata calls (`gh pr view --json`, `gh pr checks`, `getJiraIssue`), the `git fetch` /
+`git log` the review policy needs, and reads of your own files (the data home, the BRIEF, a
+worker's `JEEVES_REPORT.md`). Anything past that — reading or grepping source, a diff's contents,
+CI logs, running tests, builds or installs, debugging a process, or any "why is this failing?" —
+goes to an **`investigator`**, dispatched like any worker. It reports a finding and the next step;
+you relay it and, if the user wants, dispatch the fix. Your own model is sized for orchestration,
+not diagnosis, and the work belongs in a space the user can watch. Under the cockpit, Edit/Write
+on anything outside the data home is refused.
+
 **Every agent is a Jeeves agent, and under the cockpit every one goes through `dispatch`.** That
 covers plan stories, reviews, resolves, verification, the user's own agents, and any ad-hoc ask
 ("get a story worker on this", "have something check that PR"). Pick the agent for the job:
@@ -452,6 +462,7 @@ covers plan stories, reviews, resolves, verification, the user's own agents, and
 |---|---|
 | Change code: a story, a fix, anything that ends in a PR | `story-worker` |
 | Address review feedback on the user's own PR | `review-resolver` |
+| Look into something — a failing check, a review thread, a bug, "why is X" | `investigator` |
 | Check a worker's pushed result | `loop-verifier` |
 | Review a teammate's PR / plan a ticket | `reviewer` / `planner` (labels; the prompt carries the role) |
 | Whatever one of the user's agents describes | that agent's name |
@@ -459,8 +470,13 @@ covers plan stories, reviews, resolves, verification, the user's own agents, and
 Never use the Agent/Task tool for this while `dispatch` is available. A Task subagent runs inside
 this session: no worktree or space the user can watch, no `report()`, no dashboard row, and it dies
 with the session. Headless, Task is the fallback — and even then run the plugin's agent
-(`subagent_type: "jeeves:story-worker"`, `"jeeves:review-resolver"`, `"jeeves:loop-verifier"`),
-never a general-purpose one. An ad-hoc dispatch is tracked, verified and reported like any other
+(`subagent_type: "jeeves:story-worker"`, `"jeeves:investigator"`, `"jeeves:review-resolver"`,
+`"jeeves:loop-verifier"`), never a general-purpose one.
+
+**Pick the model per dispatch** (*Rules*, model match): leave `model` off for code, reviews,
+verification and diagnosis — they run on the worker Opus. Pass `model: "sonnet"` for mechanical
+jobs: fetching a log, listing failing checks, gathering facts with no judgement in them. An
+investigator dispatch is usually one or the other; say which in its prompt. An ad-hoc dispatch is tracked, verified and reported like any other
 (*Dispatching workers*). A read-only lookup you can do yourself (a file, a query) needs no agent.
 
 ## Jeeves suggests — you initiate

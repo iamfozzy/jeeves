@@ -162,7 +162,7 @@ The header's ⚙ opens five tabs. Field-by-field reference: [`SETUP.md`](SETUP.m
   tracking for it. **Add repos…** runs `/jeeves:setup --scan` in the orchestrator.
 - **Defaults** — your identity, and the shared defaults every project inherits: Jira, Confluence,
   GitHub review scope and base branches, review command and seed files.
-- **Agents** — the built-in agents (story worker, review resolver, verifier), each expandable to its
+- **Agents** — the built-in agents (story worker, investigator, review resolver, verifier), each expandable to its
   model, tools and prompt; **Customise** one to run your own version in cockpit dispatches, **Reset
   to built-in** to drop it. A customised agent is flagged when a plugin update changes the
   built-in, with the new built-in beside yours to compare. Below, **Your agents**: **New agent**,
