@@ -221,7 +221,7 @@ default, so `project.md` only ever holds real overrides.
 - **Quick switcher** (`Picker.tsx`) — ⌘P anywhere, Ctrl+P outside terminals; fuzzy match over
   views, spaces, workers and repos (recently opened first).
 - **Orchestrator view** — the orchestrator's PTY and the dashboard (`Dashboard.tsx`): Reminders
-  first, rows ordered by dot within each section, calm rows (green, white or no dot) folded per section — except approved stories (plan approved or ready to merge) and PRs, a repo filter when more
+  first, rows ordered by dot within each section; in Stories and Items for you to QA only done tickets fold (any open status, To Do included, stays in full); in the PR sections calm rows (green, white or no dot) fold — except approved PRs (ready to merge); a repo filter when more
   than one repo has rows, Jira and PR links, PR rows opening their description (`gh pr view`),
   every action in the row's ⋮ menu.
 - **Spaces** (`SpaceView.tsx`) — tabs (claude, codex, terminal; drag to reorder), the git panel

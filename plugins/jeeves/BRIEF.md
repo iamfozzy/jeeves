@@ -194,11 +194,12 @@ returned.
    `fields: [summary, status, priority, duedate, assignee, project, <QA-assignee field>]`:
    ```
    (project in (<every index Jira key>) AND sprint in openSprints()
-     AND (assignee = currentUser() OR (status in (<QA columns>) AND cf[<QA field id>] = currentUser())))
+     AND (assignee = currentUser() OR cf[<QA field id>] = currentUser()))
    OR key in (<ticket keys on open ledger rows>)
    ```
-   Assignee = the user → **stories**. In a QA column with the QA field = the user → **qa** (theirs
-   to *test*, not build; a ticket can be both). A ledger key that comes back Done → resolve it
+   Assignee = the user → **stories**. QA field = the user → **qa** (theirs to *test*, not build; a
+   ticket can be both), in **any** status — a ticket not yet in a QA column is upcoming QA, one
+   in a QA column is ready to test now, one done is kept for the sprint's record. A ledger key that comes back Done → resolve it
    (*State ledger*). Drop the `OR key in` clause when no ledger row names a ticket. Projects flagged
    `jira-override` whose own values differ from the defaults → one more call of the same shape per
    distinct cloudId / QA field / QA columns.
@@ -283,9 +284,12 @@ The pane is **four sections** — populate the ones that have items:
   (`pass`/`fail`/`pending`), `state` (`open`/`draft`/`changes requested`/`approved`), a `dot`, and
   `actions` — `[{label:"Resolve",run:"resolve 1857"}]` when changes are requested; none needed when
   it's just green and waiting (say so in `next`).
-- **`qa`** — tickets the user must test, **highest priority first**. Set `priority`, a `dot`, and
-  `actions` defaulting to `[{label:"Test",run:"qa ABC-5481"}]` — the key, not a row number, so it
-  survives deltas (`qa <n>` below).
+- **`qa`** — **every** current-sprint ticket whose QA field is the user, whatever its status,
+  **highest priority first**. Set `priority`, its real Jira `status`, and a `dot`: yellow (red if
+  high priority or blocking a release) once it's in a **QA column** — ready to test now — with
+  `actions` `[{label:"Test",run:"qa ABC-5481"}]` (the key, not a row number, so it survives
+  deltas; `qa <n>` below); white while it's still upstream of QA (say so in `next`, e.g. "in
+  review — not ready for QA yet"); green once done.
 - **`reviews`** — teammates' PRs in the user's review scope. Lead with `#<number>`, set `author`,
   `checks`, `state`, a `dot`, and `actions` — `[{label:"Review",run:"review 1860"}]` before a review
   exists; after one is drafted, `[{label:"Comment",run:"comment 1860"},{label:"Approve",run:"approve
@@ -337,7 +341,7 @@ notes, no "running the tick", no naming what you're checking. Work silently; sho
 **Colour key:** 🔴 needs me / blocked · 🟡 in progress / watch · 🟢 clear / done · ⚪ idle / parked.
 
 Without the cockpit, render the same four sections in the terminal — **STORIES** (# · Item ·
-Phase · Do), **MY PRs** (# · PR · Checks · Do), **QA** (# · dot · Ticket · Pri, highest first),
+Phase · Do), **MY PRs** (# · PR · Checks · Do), **QA** (# · dot · Ticket · Status · Pri, highest first),
 **REVIEWS** (# · PR by author · Checks · Do) — each a short dot-led table, one row per item,
 repo-tagged when more than one project is loaded, an empty section omitted. They *are* the whole
 picture; there is no separate cross-project summary. E.g.:

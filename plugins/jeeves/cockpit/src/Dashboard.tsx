@@ -7,7 +7,7 @@ import {
 import { editReminder, sendOrchInput } from './api'
 import { PrModal } from './PrModal'
 import { Section } from './Section'
-import type { Checks, Dot, Reminder, RepoCfg, Story, StoryPhase, SurfaceAction, Surface, WorkerSpace } from './types'
+import type { Checks, Dot, QaRow, Reminder, RepoCfg, Story, StoryPhase, SurfaceAction, Surface, WorkerSpace } from './types'
 
 const DOT_VAR: Record<Dot, string> = {
   red: 'var(--mantine-color-red-6)',
@@ -55,6 +55,12 @@ const urgent = (d?: Dot) => d === 'red' || d === 'yellow'
 // Not for reviews, where "approved" means the user already approved it.
 const approved = (r: AnyRow) => r.checks !== 'fail'
   && [r.phase, r.state, r.status, r.next, r.item].some((t) => /\bapproved\b|ready to merge|mergeable/i.test(t ?? ''))
+// A finished ticket: its plan phase or its Jira status says so.
+const DONE_STATUS = /^\s*(done|closed|resolved|released|complete|completed|cancell?ed|won'?t do)\s*$/i
+const isDone = (r: AnyRow) => r.phase === 'done' || DONE_STATUS.test(r.status ?? '')
+// Ticket sections (stories, qa) fold only done tickets — To Do and every other open
+// status stay in full, whatever their dot. PR sections fold their calm rows.
+const TICKET_SECTIONS = new Set(['stories', 'qa'])
 const FILTER_KEY = 'jeeves-cockpit-repo-filter'
 
 type AnyRow = { item: string; repo?: string; dot?: Dot; number?: string | number; key?: string; phase?: StoryPhase; state?: string; status?: string; next?: string; checks?: Checks }
@@ -126,11 +132,14 @@ export function Dashboard({ repos, surface, workers, reminders: rows }: { repos:
   const reviews = all.reviews.filter((v) => inRepo(v.r.repo))
   const inFlight = allInFlight.filter((f) => inRepo(f.repo))
 
-  // A section body: red/yellow and approved rows in full, calm rows folded behind one toggle line.
+  // A section body. Ticket sections: open tickets in full, done ones folded behind one
+  // toggle line. PR sections: red/yellow and approved rows in full, calm rows folded.
   const body = <T extends AnyRow>(sec: string, list: View<T>[], render: (v: View<T>, i: number) => React.ReactNode) => {
-    const pinned = (r: T) => urgent(r.dot) || (sec !== 'reviews' && approved(r))
+    const tickets = TICKET_SECTIONS.has(sec)
+    const pinned = (r: T) => tickets ? !isDone(r) : urgent(r.dot) || (sec !== 'reviews' && approved(r))
     const calm = list.filter((v) => !pinned(v.r)).length
     const shown = openCalm[sec] ? list : list.filter((v) => pinned(v.r))
+    const what = tickets ? 'done' : 'on track'
     return (
       <>
         {shown.map(render)}
@@ -139,7 +148,7 @@ export function Dashboard({ repos, surface, workers, reminders: rows }: { repos:
             onClick={() => setOpenCalm((o) => ({ ...o, [sec]: !o[sec] }))}>
             <Group gap={9} wrap="nowrap">
               <Box w={7} h={7} style={{ borderRadius: '50%', background: DOT_VAR.green, flex: 'none' }} />
-              <Text size="xs" c="dimmed">{openCalm[sec] ? `Hide ${calm} on track` : `${calm} on track — show`}</Text>
+              <Text size="xs" c="dimmed">{openCalm[sec] ? `Hide ${calm} ${what}` : `${calm} ${what} — show`}</Text>
             </Group>
           </UnstyledButton>
         )}
@@ -271,6 +280,20 @@ export function Dashboard({ repos, surface, workers, reminders: rows }: { repos:
         </Section>
       )}
 
+      {qa.length > 0 && (
+        <Section id="dash:qa" label="Items for you to QA" count={qa.length} icon={IconTestPipe} accent="yellow">
+          {body('qa', qa, ({ r: q, id }) => {
+            const key = q.key || q.item.match(/^\s*([A-Z][A-Z0-9]*-\d+)/)?.[1]
+            return row({
+              k: id, dot: q.dot, Icon: IconTestPipe, text: q.item, repo: q.repo,
+              actions: q.actions ?? (key && !isDone(q) ? [{ label: 'Test', run: `qa ${key}` }] : undefined),
+              details: [['Status', q.status], ['Priority', q.priority], ['Next', q.next]],
+              sub: <QaSub q={q} repo={repoFor(q.repo)} repos={repos} />
+            })
+          })}
+        </Section>
+      )}
+
       {myPrs.length > 0 && (
         <Section id="dash:my prs" label="My PRs" count={myPrs.length} icon={IconGitPullRequest} accent="cockpit">
           {body('myPrs', myPrs, ({ r: p, id }) => row({
@@ -278,17 +301,6 @@ export function Dashboard({ repos, surface, workers, reminders: rows }: { repos:
             right: <ChecksIcon checks={p.checks} />,
             details: [['State', p.state], ['Checks', p.checks ? CHECKS[p.checks].label : null], ['Next', p.next]],
             sub: filled(p.state) || filled(p.next) ? <Text size="xs" c="dimmed" lh={1.4}>{[p.state, p.next].filter(filled).join(' · ')}</Text> : undefined
-          }))}
-        </Section>
-      )}
-
-      {qa.length > 0 && (
-        <Section id="dash:qa" label="QA" count={qa.length} icon={IconTestPipe} accent="yellow">
-          {body('qa', qa, ({ r: q, n, id }) => row({
-            k: id, dot: q.dot, Icon: IconTestPipe, text: q.item, repo: q.repo,
-            actions: q.actions ?? [{ label: 'Test', run: `qa ${q.key || q.item.match(/^\s*([A-Z][A-Z0-9]*-\d+)/)?.[1] || n + 1}` }],
-            details: [['Priority', q.priority]],
-            sub: filled(q.priority) ? <Badge size="xs" variant="light" color={/highest|high/i.test(q.priority) ? 'red' : 'gray'}>{q.priority}</Badge> : undefined
           }))}
         </Section>
       )}
@@ -342,6 +354,17 @@ function StorySub({ st, repo, repos }: { st: Story; repo?: RepoCfg; repos: RepoC
       {filled(st.status) ? <Badge size="xs" variant="light" color="gray" style={{ flex: 'none' }}>{st.status}</Badge> : null}
       {ph ? <Badge size="xs" variant="light" color={ph.color} style={{ flex: 'none' }}>{ph.label}</Badge> : null}
       {filled(st.next) ? <Text size="xs" c="dimmed" lh={1.4} truncate><Linked text={st.next} repo={repo} repos={repos} /></Text> : null}
+    </Group>
+  )
+}
+
+function QaSub({ q, repo, repos }: { q: QaRow; repo?: RepoCfg; repos: RepoCfg[] }) {
+  if (!filled(q.status) && !filled(q.priority) && !filled(q.next)) return null
+  return (
+    <Group gap={6} wrap="nowrap" style={{ minWidth: 0 }}>
+      {filled(q.status) ? <Badge size="xs" variant="light" color="gray" style={{ flex: 'none' }}>{q.status}</Badge> : null}
+      {filled(q.priority) ? <Badge size="xs" variant="light" color={/highest|high/i.test(q.priority) ? 'red' : 'gray'} style={{ flex: 'none' }}>{q.priority}</Badge> : null}
+      {filled(q.next) ? <Text size="xs" c="dimmed" lh={1.4} truncate><Linked text={q.next} repo={repo} repos={repos} /></Text> : null}
     </Group>
   )
 }

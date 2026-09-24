@@ -137,7 +137,7 @@ export type SurfaceAction = { label: string; run?: string; type?: boolean; href?
 
 export type Story = { item: string; key?: string; status?: string; phase?: StoryPhase; dot?: Dot; repo?: string; next?: string; actions?: SurfaceAction[] }
 export type MyPr = { item: string; number?: string | number; checks?: Checks; state?: string; dot?: Dot; repo?: string; next?: string; actions?: SurfaceAction[] }
-export type QaRow = { item: string; key?: string; priority?: string; dot?: Dot; repo?: string; actions?: SurfaceAction[] }
+export type QaRow = { item: string; key?: string; priority?: string; status?: string; dot?: Dot; repo?: string; next?: string; actions?: SurfaceAction[] }
 export type ReviewRow = { item: string; number?: string | number; author?: string; checks?: Checks; state?: string; dot?: Dot; repo?: string; next?: string; actions?: SurfaceAction[] }
 
 export type Surface = {
