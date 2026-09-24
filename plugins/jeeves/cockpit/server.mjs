@@ -909,6 +909,230 @@ function prView(repo, number) {
   })
 }
 
+// ── Tick snapshot (BRIEF *Each tick* steps 1–2) ─────────────────────────────
+// The loop's GitHub query and Jira calls, built from the live project index so
+// they never drift. GitHub runs here; the Jira calls are returned for the
+// orchestrator to make through Atlassian Rovo (this server has no Jira access).
+const GH_LOGIN_F = CONFIG_FIELDS.identity.find((f) => f.key === 'ghLogin')
+const TICK_F = Object.fromEntries(['cloudId', 'qaAssigneeField', 'qaColumns', 'reviewScope'].map((k) => [k, CONFIG_FIELDS.defaults.find((f) => f.key === k)]))
+const REPO_WIDE_F = F('repoWide', 'Repo-wide') // legacy label the index still honours
+const SEARCH_MAX = 256 // GitHub's cap on one search string
+const TICK_PAGES = 10 // search returns at most 1000 results: 10 pages of 100
+const JIRA_KEY_ID = /^([A-Z][A-Z0-9_]*-\d+)(?:\/|$)/ // a ledger row id naming a ticket: ABC-5830, ABC-5830/S2
+
+// The searches, by alias. `scope` is every repo-wide project's `repo:` terms,
+// split across scope1, scope2… when one search string would pass SEARCH_MAX.
+function tickSearches(scopeSlugs) {
+  const base = 'is:pr is:open archived:false'
+  const s = { mine: `${base} author:@me`, requested: `${base} review-requested:@me`, reviewed: `${base} reviewed-by:@me` }
+  const scopeBase = `${base} draft:false -author:@me`
+  let q = scopeBase, n = 0
+  const flush = () => { if (q !== scopeBase) { s[n ? `scope${n}` : 'scope'] = q; n++ } q = scopeBase }
+  for (const slug of scopeSlugs) {
+    if (q !== scopeBase && q.length + slug.length + 6 > SEARCH_MAX) flush()
+    q += ` repo:${slug}`
+  }
+  flush()
+  return s
+}
+// One GraphQL document for the given searches; `after` holds each alias's cursor on a later page.
+function tickQuery(login, searches, after = {}) {
+  const frag = 'fragment P on PullRequest{number title url isDraft reviewDecision headRefName baseRefName headRefOid author{login} '
+    + 'repository{nameWithOwner} commits(last:1){nodes{commit{statusCheckRollup{state}}}} '
+    + 'reviewRequests(first:20){nodes{requestedReviewer{...on User{login} ...on Team{slug}}}} '
+    + `reviews(author:${JSON.stringify(login)},last:1){nodes{state commit{oid}}}}`
+  const aliases = Object.entries(searches).map(([k, q]) =>
+    `${k}:search(query:${JSON.stringify(q)},type:ISSUE,first:100${after[k] ? `,after:${JSON.stringify(after[k])}` : ''}){pageInfo{hasNextPage endCursor} nodes{...P}}`)
+  return `${frag} query{${aliases.join(' ')}}`
+}
+
+// `gh api graphql` → { data } or { error }. A GraphQL error alongside partial data is an error.
+function ghGraphql(query, timeout = 30000) {
+  return new Promise((res) => {
+    execFile('gh', ['api', 'graphql', '-f', `query=${query}`], { timeout, maxBuffer: 32 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+      let body = null
+      try { body = JSON.parse(stdout) } catch {}
+      const gql = body?.errors?.length ? body.errors.map((e) => e.message).join('; ') : null
+      if (err || gql || !body?.data) {
+        return res({ error: gql || (err?.code === 'ENOENT' ? 'gh not found on PATH' : err?.killed ? `gh timed out after ${timeout / 1000}s` : lastLine(stderr || err?.message || 'gh returned no data')) })
+      }
+      res({ data: body.data })
+    })
+  })
+}
+
+// Run the searches, paging each alias that returned a full page. A failed first
+// page is { error }; a failure on a later page keeps what arrived and names the
+// aliases it cut short in `incomplete`.
+async function runTickSearch(login, searches, gql = ghGraphql) {
+  const nodes = Object.fromEntries(Object.keys(searches).map((k) => [k, []]))
+  const incomplete = {}
+  let pending = searches, after = {}
+  for (let page = 0; Object.keys(pending).length; page++) {
+    if (page === TICK_PAGES) { for (const k of Object.keys(pending)) incomplete[k] = `stopped after ${TICK_PAGES} pages`; break }
+    const r = await gql(tickQuery(login, pending, after))
+    if (r.error && !page) return { error: r.error }
+    if (r.error) { for (const k of Object.keys(pending)) incomplete[k] = `page ${page + 1}: ${r.error}`; break }
+    const next = {}, cursors = {}
+    for (const k of Object.keys(pending)) {
+      const s = r.data[k]
+      nodes[k].push(...(s?.nodes || []))
+      if (s?.pageInfo?.hasNextPage) { next[k] = pending[k]; cursors[k] = s.pageInfo.endCursor }
+    }
+    pending = next; after = cursors
+  }
+  return { nodes, incomplete }
+}
+
+// One PR as the loop paints and judges it. Absent fields are false / none.
+function tickPr(n) {
+  const p = { number: n.number, title: n.title, url: n.url, head: n.headRefName, base: n.baseRefName, headRefOid: n.headRefOid }
+  if (n.isDraft) p.isDraft = true
+  if (n.reviewDecision) p.reviewDecision = n.reviewDecision
+  const roll = n.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state
+  if (roll) p.checks = checkState({ state: roll })
+  return p
+}
+
+// Search results → { <project id>: { myPrs, reviews } }, keeping only index repos
+// (every repo, keyed by owner/name, in generic mode). A project with no PRs is absent.
+// reviews = requested ∪ reviewed ∪ scope, minus the user's own PRs.
+function tickShape(nodes, repos, login) {
+  const bySlug = new Map(repos.map((r) => [r.slug.toLowerCase(), r]))
+  const me = login.toLowerCase()
+  const projects = {}
+  const owner = (n) => {
+    const slug = n?.number && n.repository?.nameWithOwner
+    if (!slug) return null
+    return repos.length ? bySlug.get(slug.toLowerCase()) || null : { id: slug }
+  }
+  const bucket = (id) => (projects[id] ||= { myPrs: [], reviews: [] })
+  for (const n of nodes.mine || []) {
+    const r = owner(n)
+    if (!r) continue
+    const p = tickPr(n)
+    if (r.jiraKey && !n.isDraft && !new RegExp(`\\b${reEsc(r.jiraKey)}-\\d+\\b`, 'i').test(n.title)) p.missingKey = true
+    bucket(r.id).myPrs.push(p)
+  }
+  const idOf = (n) => `${n.repository.nameWithOwner}#${n.number}`
+  const requested = new Set((nodes.requested || []).filter(owner).map(idOf))
+  const seen = new Set()
+  const candidates = Object.entries(nodes).filter(([k]) => k !== 'mine').flatMap(([, v]) => v)
+  for (const n of candidates) {
+    const r = owner(n)
+    if (!r || seen.has(idOf(n)) || (n.author?.login || '').toLowerCase() === me) continue
+    seen.add(idOf(n))
+    const p = tickPr(n)
+    p.author = n.author?.login || ''
+    const reviewers = (n.reviewRequests?.nodes || []).map((x) => x.requestedReviewer?.login || x.requestedReviewer?.slug).filter(Boolean)
+    if (requested.has(idOf(n)) || reviewers.some((x) => x.toLowerCase() === me)) p.requested = true
+    if (reviewers.length) p.reviewers = reviewers
+    const mine = n.reviews?.nodes?.[0]
+    if (mine) p.myReview = { state: mine.state, oid: mine.commit?.oid || null }
+    bucket(r.id).reviews.push(p)
+  }
+  for (const b of Object.values(projects)) for (const list of Object.values(b)) list.sort((a, c) => c.number - a.number)
+  return projects
+}
+
+// prev → next, per project and section: added PRs whole, changed PRs as their
+// number plus each changed field's new value (null = gone), removed numbers, and
+// how many are unchanged. A project with nothing new is just { unchanged }.
+function tickDelta(prev, next) {
+  const out = {}
+  for (const id of new Set([...Object.keys(prev), ...Object.keys(next)])) {
+    const d = {}
+    let unchanged = 0
+    for (const sec of ['myPrs', 'reviews']) {
+      const was = new Map((prev[id]?.[sec] || []).map((p) => [p.number, p]))
+      const added = [], changed = []
+      for (const p of next[id]?.[sec] || []) {
+        const o = was.get(p.number)
+        was.delete(p.number)
+        if (!o) { added.push(p); continue }
+        const c = {}
+        for (const k of new Set([...Object.keys(o), ...Object.keys(p)])) if (JSON.stringify(o[k]) !== JSON.stringify(p[k])) c[k] = p[k] ?? null
+        if (Object.keys(c).length) changed.push({ number: p.number, ...c }); else unchanged++
+      }
+      const s = {}
+      if (added.length) s.added = added
+      if (changed.length) s.changed = changed
+      if (was.size) s.removed = [...was.keys()]
+      if (Object.keys(s).length) d[sec] = s
+    }
+    if (Object.keys(d).length || unchanged) out[id] = { ...d, unchanged }
+  }
+  return out
+}
+
+// The Jira searches the orchestrator runs (BRIEF step 2): one per distinct
+// cloudId / QA field / QA columns across the projects' effective configs, each
+// with its projects' keys and the ticket keys on their open ledger rows. QA is
+// the QA field = the user in any status; qaColumns rides along to colour the rows.
+function tickJiraCalls(repos, defaultsMd, projectMd, ledgerMd) {
+  const groups = new Map()
+  const group = (cloudId, qaField, qaColumns) => {
+    const k = JSON.stringify([cloudId, qaField, qaColumns])
+    if (!groups.has(k)) groups.set(k, { cloudId, qaField, qaColumns, keys: new Set(), ledger: new Set() })
+    return groups.get(k)
+  }
+  if (!repos.length) {
+    const eff = (f) => readField(defaultsMd, f)
+    if (eff(TICK_F.cloudId)) group(eff(TICK_F.cloudId), eff(TICK_F.qaAssigneeField), eff(TICK_F.qaColumns))
+  }
+  for (const r of repos) {
+    const md = projectMd(r.id)
+    const eff = (f) => effectiveField(md, defaultsMd, f).value
+    if (!eff(TICK_F.cloudId)) continue
+    const g = group(eff(TICK_F.cloudId), eff(TICK_F.qaAssigneeField), eff(TICK_F.qaColumns))
+    if (r.jiraKey) g.keys.add(r.jiraKey)
+    const led = parseLedger(ledgerMd(r.id))
+    for (const row of led.rows || []) {
+      const m = row.kind !== 'done' && row.id.match(JIRA_KEY_ID)
+      if (m) g.ledger.add(m[1])
+    }
+  }
+  const calls = []
+  for (const g of groups.values()) {
+    const id = g.qaField?.match(/^customfield_(\d+)$/)?.[1]
+    const cf = g.qaField && (id ? `cf[${id}]` : `"${g.qaField}"`)
+    const who = cf ? `(assignee = currentUser() OR ${cf} = currentUser())` : 'assignee = currentUser()'
+    const sprint = `sprint in openSprints() AND ${who}`
+    const mine = g.keys.size ? `project in (${[...g.keys].join(', ')}) AND ${sprint}` : repos.length ? null : sprint
+    const led = g.ledger.size ? `key in (${[...g.ledger].join(', ')})` : null
+    const jql = mine && led ? `(${mine}) OR ${led}` : mine || led
+    if (!jql) continue
+    const fields = ['summary', 'status', 'priority', 'duedate', 'assignee', 'project', ...(g.qaField ? [g.qaField] : [])]
+    const call = { args: { cloudId: g.cloudId, jql, fields, maxResults: 100 } }
+    if (g.qaColumns) call.qaColumns = g.qaColumns
+    calls.push(call)
+  }
+  return calls
+}
+
+// One tick: { out, snap }. `out` is what the tool returns; `snap`, set only when
+// the search completed, is the snapshot the next delta is taken against.
+async function tickSnapshot(prev, gql = ghGraphql) {
+  const repos = [...REPOS], dmd = readDefaults()
+  const jira = tickJiraCalls(repos, dmd, (id) => readMd(projectFile(id)), (id) => readMd(join(NEUTRAL, 'projects', id, 'state.md')))
+  let login = readField(readMd(IDENTITY_FILE), GH_LOGIN_F)
+  if (!login) {
+    const r = await gql('query{viewer{login}}')
+    if (r.error) return { out: { error: r.error, jira } }
+    login = r.data.viewer.login
+  }
+  const scope = repos.filter((r) => {
+    const md = readMd(projectFile(r.id))
+    const v = readField(md, TICK_F.reviewScope) ?? readField(md, REPO_WIDE_F) ?? readField(dmd, TICK_F.reviewScope)
+    return v && !/^mine/i.test(v)
+  }).map((r) => r.slug)
+  const r = await runTickSearch(login, tickSearches(scope), gql)
+  if (r.error) return { out: { error: r.error, jira } }
+  const projects = tickShape(r.nodes, repos, login)
+  if (Object.keys(r.incomplete).length) return { out: { incomplete: r.incomplete, projects, jira } }
+  return { out: prev ? { delta: tickDelta(prev, projects), jira } : { projects, jira }, snap: projects }
+}
+
 // What a BRAND-NEW branch is cut from: the project's configured base branch
 // (project.md "base branch", e.g. `qa`), else origin's default
 // (main/master). Fetched first so a new branch is never based on a stale local
@@ -2291,6 +2515,24 @@ function buildMcpServer(role, caller) {
     try { s.term.write(`\x1b[200~${text}\n\n${resultAsk(l)}\x1b[201~`) } catch { return bad('write failed') }
     setTimeout(() => { try { s.term.write('\r') } catch {} }, 150)
     return ok(`sent to ${tabRef} — call wait_tab for its answer`)
+  })
+
+  // The last complete tick this MCP session saw, for the next delta. A restarted
+  // orchestrator connects a new session, so its first call is always whole.
+  let prevTick = null
+  if (full) srv.registerTool('tick_snapshot', {
+    description: 'Run the tick\'s GitHub query (BRIEF *Each tick* step 1) server-side from the project index and return its PRs per project, plus the exact Jira call(s) for step 2. Compact JSON:\n'
+      + '- `projects: { <project id>: { myPrs, reviews } }` on the first call of this session or with full: true. A PR is { number, title, url, head, base, headRefOid, isDraft?, reviewDecision?, checks? (pass/fail/pending), missingKey? (own non-draft PR without its project\'s Jira key) }; a review candidate adds author, requested? (the user is asked to review), reviewers? (requested logins/teams), myReview? { state, oid } (the user\'s latest review). Absent = false/none; a project with no PRs is absent. Only configured repos (every repo, keyed owner/name, when none are configured).\n'
+      + '- `delta: { <project id>: { myPrs?, reviews?: { added?: [PR], changed?: [{ number, <field>: <new value, null = gone> }], removed?: [number] }, unchanged } }` on later calls — only what changed since this session\'s last complete call.\n'
+      + '- `jira: [{ args, qaColumns? }]`: pass each `args` as-is to Atlassian Rovo searchJiraIssuesUsingJql (page with nextPageToken); qaColumns are that call\'s QA columns, for colouring QA rows.\n'
+      + '- `incomplete: { <alias>: reason }` with whole `projects`: a later page failed, so those searches are cut short — do not resolve rows missing from them. The next call deltas against the last complete one.\n'
+      + '- `{ error, jira }`: gh is missing, unauthenticated or the query failed — run the Jira call(s) anyway and report GitHub as unavailable.\n'
+      + 'Pass full: true after a /compact or whenever you do not hold the last result.',
+    inputSchema: { full: z.boolean().optional().describe('Return every PR, not a delta.') }
+  }, async ({ full: whole } = {}) => {
+    const { out, snap } = await tickSnapshot(whole ? null : prevTick)
+    if (snap) prevTick = snap
+    return { content: [{ type: 'text', text: JSON.stringify(out) }], isError: !!out.error }
   })
 
   if (full) srv.registerTool('inbox', {

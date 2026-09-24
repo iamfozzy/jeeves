@@ -37,12 +37,12 @@ failed fix attempts.
 
 ## Running under the cockpit
 Launched by the cockpit, this main loop session gains MCP tools named `mcp__cockpit__<name>` —
-`dispatch`, `close_work`, `inbox`, `surface_render`, `write_state`, the space tools `open_space` / `add_tab` /
+`dispatch`, `tick_snapshot`, `close_work`, `inbox`, `surface_render`, `write_state`, the space tools `open_space` / `add_tab` /
 `close_space`, and the project-config tools `create_project` / `update_project` / `delete_project`
 — and every session it dispatches gains a `report` tool. Launched headless instead (`/jeeves:start`
 in a plain terminal session, no cockpit), they're absent. They can also arrive **deferred** —
 listed by name only, uncallable until loaded — so at launch load them with `ToolSearch`
-(`select:mcp__cockpit__dispatch,mcp__cockpit__close_work,mcp__cockpit__inbox,mcp__cockpit__surface_render,mcp__cockpit__write_state`;
+(`select:mcp__cockpit__dispatch,mcp__cockpit__tick_snapshot,mcp__cockpit__close_work,mcp__cockpit__inbox,mcp__cockpit__surface_render,mcp__cockpit__write_state`;
 the space and config tools when you first need them), and again in one call after any `/compact`
 or restart. They're absent only when that search finds
 nothing; a tool you can't see in your list is not a missing one. Present → use them; absent → do
@@ -165,13 +165,24 @@ one Jira call however many projects are configured, plus work only on items that
 every result to its project through the index — a PR by `repository.nameWithOwner` = index repo, a
 ticket by its Jira key (shared keys → *Which repo*). A foregrounded project is reported first.
 
-Steps 1 and 2 are independent: issue the GitHub call and the Jira call **in the same message**, as
-parallel tool calls, so the tick waits for the slower of the two rather than both in turn. Their
-extra calls (paging, `jira-override` calls) go out together in the next message, once both have
-returned.
+Under the cockpit, `mcp__cockpit__tick_snapshot` builds steps 1 and 2 from the index: it runs the
+GitHub query and returns the Jira call(s) for you to make. Call it first, paint `myPrs`/`reviews`
+from it, then send every `jira[].args` in one message. Headless, or when it returns `error`, run
+steps 1 and 2 as written below: they're independent, so issue the GitHub call and the Jira call **in
+the same message**, as parallel tool calls, so the tick waits for the slower of the two rather than
+both in turn. Their extra calls (paging, `jira-override` calls) go out together in the next
+message, once both have returned.
 
-1. **GitHub — one call**, re-run fresh every tick (never re-poll known PR numbers instead — a PR a
-   worker just opened would never appear):
+1. **GitHub.** Under the cockpit: `tick_snapshot` with `full: true` on the first tick of a session,
+   after any `/compact` or restart, and on a status request; without it on every other tick. It
+   returns `projects` (per project `myPrs` and `reviews` candidates, only index repos) or, after the
+   first call, a `delta` — per project the `added`, `changed` (number plus each changed field's new
+   value) and `removed` PRs against its last call; upsert and remove exactly those rows. An absent
+   PR field is false or none; `missingKey` marks an own non-draft PR whose title lacks its
+   project's key. `incomplete` → paint what came back and resolve nothing missing from the searches
+   it names this tick. `error` → run the query below yourself; if `gh` fails there too, say GitHub
+   is unavailable in one line and carry on with Jira. Headless: one call, re-run fresh every tick
+   (never re-poll known PR numbers instead — a PR a worker just opened would never appear):
    ```
    gh api graphql -f query='fragment P on PullRequest{number title url isDraft reviewDecision
      headRefName headRefOid author{login} repository{nameWithOwner}
@@ -196,8 +207,11 @@ returned.
      project's ticket key in its title (e.g. `ABC-1234`). One without → surface it under
      **NEEDS YOU** and ask for the ticket — don't guess, don't rename until they answer; then
      prepend `[<KEY>] `. **Skip drafts** (a missing ticket can be *why* it's a draft).
-2. **Jira — one call** via the **Atlassian Rovo** MCP server (`mcp__claude_ai_Atlassian_Rovo__*`)
-   — never a standalone `claude.ai Jira` server, even if one is connected. `searchJiraIssuesUsingJql`
+2. **Jira** via the **Atlassian Rovo** MCP server (`mcp__claude_ai_Atlassian_Rovo__*`) — never a
+   standalone `claude.ai Jira` server, even if one is connected. Under the cockpit: pass each
+   `tick_snapshot` `jira[].args` to `searchJiraIssuesUsingJql` unchanged (page with
+   `nextPageToken`); that entry's `qaColumns` are its QA columns. Never edit the args. Headless: one
+   call, `searchJiraIssuesUsingJql`
    with the defaults' `cloudId`, `maxResults: 100` (page with `nextPageToken`), and
    `fields: [summary, status, priority, duedate, assignee, project, <QA-assignee field>]`:
    ```
