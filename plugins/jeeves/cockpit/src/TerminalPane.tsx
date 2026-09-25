@@ -107,14 +107,16 @@ export function TerminalPane({ sid, cwd, cmd, active, onTitle }: { sid: string; 
     // The link (ptyLink.ts) keeps one live socket, queues and resends input across
     // reconnects, and reports its state to the badge. On every open after the first,
     // the server replays its buffer (or starts a new session), so reset first to
-    // avoid a doubled screen.
+    // avoid a doubled screen. It refocuses the terminal only when focus is nowhere
+    // else (the page body, or already in this pane) — never out of an open modal.
+    const focusFree = () => { const a = document.activeElement; return !a || a === document.body || !!el?.contains(a) }
     const link = createPtyLink({
       url,
       socket: (u) => new WebSocket(u) as unknown as SocketLike,
       now: () => Date.now(),
       setTimeout: (fn, ms) => window.setTimeout(fn, ms),
       clearTimeout: (id) => window.clearTimeout(id),
-      onOpen: (fresh) => { if (!fresh) term.reset(); refit(); if (activeRef.current) term.focus() },
+      onOpen: (fresh) => { if (!fresh) term.reset(); refit(); if (activeRef.current && focusFree()) term.focus() },
       onOutput: (d) => term.write(d),
       onExit: (code) => term.write(`${RESET_MODES}\r\n[session ended: ${code}]\r\n`),
       onState: (state, code, reason) => setLink({ state, code, reason })

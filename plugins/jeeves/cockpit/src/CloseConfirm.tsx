@@ -21,7 +21,7 @@ export function CloseConfirm({ opened, onChange, label, size, icon, children }: 
         </ActionIcon>
       </Popover.Target>
       {/* Portalled, but React events still bubble to the row/tab; keep them here. */}
-      <Popover.Dropdown p={12} maw={340} onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()} onAuxClick={(e) => e.stopPropagation()}>
+      <Popover.Dropdown p={12} maw={340} onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()} onAuxClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
         {children}
       </Popover.Dropdown>
     </Popover>

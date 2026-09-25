@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -67,20 +67,52 @@ test('install-cli', { skip: process.platform === 'win32' && 'needs a POSIX bash'
     assert.match(again, /already added to PATH in .*\.zshrc/)
   })
 
-  await t.test('bash: prefers an existing .bashrc over .bash_profile', async () => {
-    const home = join(tmp, 'home-bash'), dir = join(tmp, 'not-on-path-bash')
+  // Both stub uname so the outcome doesn't depend on the host running the tests.
+  await t.test('bash on Linux: prefers an existing .bashrc over .bash_profile', async () => {
+    const shims = join(tmp, 'shims-linux'), home = join(tmp, 'home-bash'), dir = join(tmp, 'not-on-path-bash')
+    mkdirSync(shims)
     mkdirSync(home)
+    shim(join(shims, 'uname'), 'echo Linux')
     writeFileSync(join(home, '.bashrc'), '# existing\n')
-    await install(dir, { HOME: home, SHELL: '/bin/bash' })
+    await install(dir, { HOME: home, SHELL: '/bin/bash', PATH: shims + delimiter + process.env.PATH })
     assert.ok(readFileSync(join(home, '.bashrc'), 'utf8').includes(`export PATH="${dir}:$PATH"`))
     assert.ok(!existsSync(join(home, '.bash_profile')))
   })
 
-  await t.test('bash: falls back to .bash_profile when there is no .bashrc', async () => {
-    const home = join(tmp, 'home-bash-noprofile'), dir = join(tmp, 'not-on-path-bash2')
+  await t.test('bash on Linux: falls back to .bash_profile when there is no .bashrc', async () => {
+    const shims = join(tmp, 'shims-linux2'), home = join(tmp, 'home-bash-noprofile'), dir = join(tmp, 'not-on-path-bash2')
+    mkdirSync(shims)
     mkdirSync(home)
-    await install(dir, { HOME: home, SHELL: '/bin/bash' })
+    shim(join(shims, 'uname'), 'echo Linux')
+    await install(dir, { HOME: home, SHELL: '/bin/bash', PATH: shims + delimiter + process.env.PATH })
     assert.ok(readFileSync(join(home, '.bash_profile'), 'utf8').includes(`export PATH="${dir}:$PATH"`))
+  })
+
+  await t.test('bash on macOS: always prefers .bash_profile — Terminal runs login shells, which read it, not .bashrc', async () => {
+    const shims = join(tmp, 'shims-darwin'), home = join(tmp, 'home-bash-darwin'), dir = join(tmp, 'not-on-path-bash-darwin')
+    mkdirSync(shims)
+    mkdirSync(home)
+    shim(join(shims, 'uname'), 'echo Darwin')
+    writeFileSync(join(home, '.bashrc'), '# existing\n')
+    await install(dir, { HOME: home, SHELL: '/bin/bash', PATH: shims + delimiter + process.env.PATH })
+    assert.ok(readFileSync(join(home, '.bash_profile'), 'utf8').includes(`export PATH="${dir}:$PATH"`))
+    assert.equal(readFileSync(join(home, '.bashrc'), 'utf8'), '# existing\n', '.bashrc is left untouched')
+  })
+
+  await t.test('the installed jeeves wrapper resolves the newest cockpit.mjs, skipping jeeves-devlink .bak- backups', async () => {
+    const home = join(tmp, 'home-bak'), dir = join(tmp, 'bak-test')
+    const real = join(home, '.claude', 'plugins', 'cache', 'jeeves-marketplace', 'jeeves', '1.2.3', 'cockpit', 'bin')
+    const bak = join(home, '.claude', 'plugins', 'cache', 'jeeves-marketplace', 'jeeves', '1.2.3.bak-20250101-120000', 'cockpit', 'bin')
+    mkdirSync(real, { recursive: true })
+    mkdirSync(bak, { recursive: true })
+    writeFileSync(join(real, 'cockpit.mjs'), "console.log('real')\n")
+    writeFileSync(join(bak, 'cockpit.mjs'), "console.log('bak')\n")
+    // The backup is newer, so an unfiltered `ls -t` would rank it first.
+    utimesSync(join(bak, 'cockpit.mjs'), new Date(Date.now() + 5000), new Date(Date.now() + 5000))
+    await install(dir, { HOME: home })
+    const out = await new Promise((res, rej) =>
+      execFile(join(dir, 'jeeves'), { env: { ...process.env, HOME: home } }, (err, stdout, stderr) => (err ? rej(new Error(stderr || err.message)) : res(stdout))))
+    assert.equal(out.trim(), 'real')
   })
 
   await t.test('unrecognised $SHELL: prints instructions, writes no rc file', async () => {

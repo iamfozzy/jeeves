@@ -1,5 +1,5 @@
 ---
-description: Start or continue Jeeves — the standing dev-assistant monitoring loop — for the repo this session is in. Watches Jira + GitHub and surfaces what needs you as suggestions you initiate (plan/review/resolve), never acting on its own; on your go-ahead it dispatches worker agents.
+description: Start or continue Jeeves — the standing dev-assistant monitoring loop — for the repo this session is in. Watches Jira + GitHub and surfaces what needs you as suggestions you initiate (plan/review/resolve), never acting on its own; on your go-ahead it dispatches worker agents, and an approved plan's go-ahead covers its stories and one review of each story PR.
 argument-hint: "[project or repo name]"
 disable-model-invocation: true
 ---

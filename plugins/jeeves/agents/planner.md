@@ -61,10 +61,14 @@ Under the cockpit, report through the steps in your system prompt with the plan 
 
 ## Revisions
 Stay available after reporting: until the plan is approved, the loop sends you the user's
-comments on it (from the ticket or the plan page), or a fresh planner gets the current plan and the
-comments in its prompt. Treat each comment as a question about the code, not a request to agree:
-check it against the repo the way you researched the plan. Then report, as a new report:
-- **Changed sections** — each section you changed, in full, under its heading from the shape above.
-  None → say so.
-- **Replies** — one per comment, keyed by the comment id you were given: what you found and what you
-  changed, or why the plan already covers it. Plain English, a few sentences.
+comments on it, each with its id and source (page inline, page footer or ticket), or a fresh
+planner gets the current plan and the comments in its prompt. Treat each comment as a question
+about the code, not a request to agree: check it against the repo the way you researched the plan.
+Then report, as a new report:
+- **Changed sections** — each section you changed, in full, as plain HTML: its `<h2>` heading from
+  the shape above and everything up to the next one, in `<p>`, `<ul>`/`<ol>`, `<table>`, `<code>`
+  and `<pre>` only — no Confluence macros (`<ac:…>`, storage format). The loop fits it to the page's
+  HTML form and splices it in. None → say so.
+- **Replies** — one per comment, keyed by the comment id and source you were given, each starting
+  `[Jeeves] `: what you found and what you changed, or why the plan already covers it. Plain
+  English, a few sentences.

@@ -3,7 +3,7 @@ import { Badge, Box, Button, Group, Loader, Modal, Stack, Text } from '@mantine/
 import { IconAlertTriangle, IconArrowLeft, IconCircleCheck, IconCircleCheckFilled, IconCircleDashed, IconCircleXFilled, IconExternalLink, IconFileText, IconGitMerge, IconGitPullRequest, IconGitPullRequestClosed, IconGitPullRequestDraft, IconLoader2, IconMessage, IconUsers } from '@tabler/icons-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { getPrView } from './api'
+import { getPrView, isHttpUrl } from './api'
 import { Section } from './Section'
 import type { Checks, PrView } from './types'
 
@@ -98,7 +98,7 @@ export function PrModal({ repoId, number, title, onClose }: { repoId: string | n
                   {typeof shown.changedFiles === 'number' ? <Text span inherit c="dimmed"> · {shown.changedFiles} file{shown.changedFiles === 1 ? '' : 's'}</Text> : null}
                 </Text>
               ) : null}
-              {shown.url ? (
+              {shown.url && isHttpUrl(shown.url) ? (
                 <Button component="a" href={shown.url} target="_blank" rel="noreferrer" size="compact-xs" variant="light" color="gray" ml="auto"
                   rightSection={<IconExternalLink size={12} />}>Open on GitHub</Button>
               ) : null}
@@ -206,7 +206,7 @@ export function PrPane({ repoId, number, state, checks }: { repoId: string; numb
         </Stack>
         <Group gap={8} mt={14} grow>
           <Button size="compact-sm" variant="light" color="gray" leftSection={<IconFileText size={14} />} onClick={() => setFull(true)}>Description</Button>
-          {pr.url ? (
+          {pr.url && isHttpUrl(pr.url) ? (
             <Button component="a" href={pr.url} target="_blank" rel="noreferrer" size="compact-sm" variant="light" color="gray" rightSection={<IconExternalLink size={13} />}>GitHub</Button>
           ) : null}
         </Group>
@@ -223,7 +223,7 @@ export function PrPane({ repoId, number, state, checks }: { repoId: string; numb
                 <Text size="xs" style={{ color: k.color, flex: 'none' }}>{k.label}</Text>
               </Group>
             )
-            return c.url
+            return c.url && isHttpUrl(c.url)
               ? <Box key={i} component="a" href={c.url} target="_blank" rel="noreferrer" className="ck-row" style={{ display: 'block', color: 'inherit', textDecoration: 'none' }}>{line}</Box>
               : <Box key={i}>{line}</Box>
           })}

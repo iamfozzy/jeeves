@@ -743,7 +743,8 @@ function LoopTab({ view, s, write, onSaved }: { view: ConfigView; s: SettingsVie
             { title: 'Orchestrator', description: 'The session that runs the loop. Applies on its next Restart.', specs: [
               { key: 'orchModel', label: 'Model', select: c.models },
               { key: 'orchEffort', label: 'Effort', choices: c.efforts, hint: 'Reasoning effort for the loop.' },
-              { key: 'orchPermission', label: 'Permission mode', select: c.permissionModes, hint: "Match the workers' so their messages arrive without approval." }
+              { key: 'orchPermission', label: 'Permission mode', select: c.permissionModes, hint: "Match the workers' so their messages arrive without approval." },
+              { key: 'atlassianServer', label: 'Atlassian MCP server', hint: 'Its name as tool names spell it (mcp__<name>__getJiraIssue). The server the loop uses for Jira and Confluence.' }
             ] },
             { title: 'Workers', description: 'Sessions the loop dispatches. Applies to the next dispatch.', specs: [
               { key: 'workerModel', label: 'Model', select: c.models, hint: 'Any Opus the loop asks for runs as this if it is an Opus, else Opus 5.5.' },
@@ -947,14 +948,14 @@ function StatusLineSection() {
 }
 
 // What the orchestrator's guard refused (guard.log), newest first: a refusal it genuinely
-// needed is a case for widening bin/guard-orchestrator.mjs's allowlist.
+// needed is a case for loosening bin/guard-orchestrator.mjs.
 function GuardSection() {
   const [rows, setRows] = useState<GuardRow[] | null>(null)
   const load = () => { getGuardLog().then((r) => setRows(r.rows)).catch(() => setRows([])) }
   useEffect(load, [])
   const when = (at: string) => new Date(at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
   return (
-    <Section description="What the orchestrator tried itself and was stopped from doing. One it genuinely needed means the allowlist should grow."
+    <Section description="What the orchestrator tried itself and was stopped from doing. One it genuinely needed means the guard should allow it."
       file="guard.log" right={<Button size="compact-xs" variant="subtle" color="gray" onClick={load}>Refresh</Button>}>
       {rows === null ? <Text size="sm" c="dimmed">Loading…</Text> : !rows.length ? <Text size="sm" c="dimmed">Nothing refused yet.</Text> : (
         <Stack gap={8}>

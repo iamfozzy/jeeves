@@ -13,7 +13,7 @@ import { SpacePanel } from './SpacePanel'
 import { closeWork, deleteWorktree, getConfig, getGit, getHealth, getLayout, isHttpUrl, isUnauthorized, killSession, onUnauthorized, restartOrchestrator, saveLayout } from './api'
 import { CLIENT_ID, useCockpitEvents } from './events'
 import { applyAppearance, DEFAULT_APPEARANCE } from './theme'
-import { applyOwnActiveTabs, mergeLocalSpaces, resolveActiveSpaceId, stripActiveTabs } from './types'
+import { applyOwnActiveTabs, mergeLocalSpaces, pruneActiveTabs, remoteLayoutAction, resolveActiveSpaceId, stripActiveTabs } from './types'
 import type { GitInfo, Health, Layout, OrchContext, RepoCfg, Space, Tab, TabKind, WorkerSpace } from './types'
 
 const HEADER_H = 48
@@ -69,11 +69,16 @@ function loadLayout(): { spaces: Space[]; activeSpaceId: string } {
   return { spaces: [], activeSpaceId: ORCH }
 }
 
+// A layout as the server compares it: activeTabId blanked out, since that's per-browser.
+const wire = (l: Layout) => JSON.stringify({ spaces: stripActiveTabs(l.spaces), scratch: stripActiveTabs([l.scratch])[0], pinned: l.pinned, recent: l.recent })
+
 export function App() {
   const unauthorized = useSyncExternalStore(onUnauthorized, isUnauthorized)
   const [repos, setRepos] = useState<RepoCfg[]>([])
   const [home, setHome] = useState('')
   const [scratchRoot, setScratchRoot] = useState('')
+  const [configErr, setConfigErr] = useState<string | null>(null)
+  const [configRetry, setConfigRetry] = useState(0)
   const [scratch, setScratch] = useState<Space>(loadScratch)
   const [spaces, setSpaces] = useState<Space[]>(() => loadLayout().spaces)
   const [activeSpaceId, setActiveSpaceId] = useState<string>(() => loadLayout().activeSpaceId)
@@ -90,10 +95,11 @@ export function App() {
   // of the synced layout. Kept in a ref (not state): it's read inside patchSpace's
   // updater and written straight to storage, never needs its own render.
   const activeTabsRef = useRef<Record<string, string>>(loadActiveTabs())
-  const setActiveTab = (spaceId: string, tabId: string) => {
-    activeTabsRef.current = { ...activeTabsRef.current, [spaceId]: tabId }
-    try { localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify(activeTabsRef.current)) } catch {}
+  const storeActiveTabs = (next: Record<string, string>) => {
+    activeTabsRef.current = next
+    try { localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify(next)) } catch {}
   }
+  const setActiveTab = (spaceId: string, tabId: string) => storeActiveTabs({ ...activeTabsRef.current, [spaceId]: tabId })
   // The git side panel's shown/hidden state: one setting for every space and worker.
   const [panelOpen, setPanelOpen] = useState(() => { try { return localStorage.getItem(PANEL_KEY) !== '0' } catch { return true } })
   const togglePanel = () => setPanelOpen((v) => { const n = !v; try { localStorage.setItem(PANEL_KEY, n ? '1' : '0') } catch {}; return n })
@@ -107,13 +113,15 @@ export function App() {
   const [navOpen, { toggle: toggleNav, close: closeNav }] = useDisclosure(false)
   useEffect(closeNav, [activeSpaceId])
 
-  // Refetch on mount and whenever config changes server-side (a project created /
-  // updated / deleted, a cockpit.json save). The appearance (fonts) applies at once.
+  // Refetch on mount, whenever config changes server-side (a project created /
+  // updated / deleted, a cockpit.json save), on every reconnect and on Retry. The
+  // appearance (fonts) applies at once. A failed fetch keeps the last good config.
   useEffect(() => {
     getConfig()
-      .then((c) => { setRepos(c.repos); setHome(c.home); setScratchRoot(c.scratchRoot || c.home); applyAppearance(c.appearance ?? DEFAULT_APPEARANCE) })
-      .catch(() => { setRepos([]); applyAppearance(DEFAULT_APPEARANCE) })
-  }, [configNonce])
+      .then((c) => { setRepos(c.repos); setHome(c.home); setScratchRoot(c.scratchRoot || c.home); applyAppearance(c.appearance ?? DEFAULT_APPEARANCE); setConfigErr(null) })
+      .catch((e) => { setConfigErr(e instanceof Error ? e.message : String(e)); if (!home) applyAppearance(DEFAULT_APPEARANCE) })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configNonce, connectNonce, configRetry])
 
   // Persist the scratchpad's tabs (its cwd is injected at render, not stored).
   useEffect(() => { try { localStorage.setItem(SCRATCH_KEY, JSON.stringify(scratch)) } catch {} }, [scratch])
@@ -197,14 +205,14 @@ export function App() {
   // The layout is the server's (/api/layout), shared by every browser and origin;
   // localStorage only paints it before the fetch lands. Nothing is saved until the
   // fetch has, so a stale local copy never overwrites the server's. `synced` holds
-  // the last layout read from or sent to the server (activeTabId blanked out, since
-  // that's per-browser and never part of what two browsers agree is "the same
-  // layout"), so applying one — or switching a tab — never triggers an echoing save.
+  // the last layout read from or sent to the server (as `wire` compares it), so
+  // applying one — or switching a tab — never triggers an echoing save.
   const synced = useRef('')
+  const saving = useRef(0) // layout saves in flight
   const [hydrated, setHydrated] = useState(false)
   // Whether THIS connection's own resync has landed yet: set false the moment the
   // socket (re)opens, true once its `layout` push (or the initial REST fetch) has
-  // been applied. Saving before that could clobber the server with a locally-drifted
+  // been handled. Saving before that could clobber the server with a locally-drifted
   // copy from before the drop.
   const [layoutSynced, setLayoutSynced] = useState(false)
   const seenConnect = useRef(0)
@@ -214,20 +222,34 @@ export function App() {
     setLayoutSynced(false)
   }, [connectNonce])
   function applyLayout(l: Layout) {
-    synced.current = JSON.stringify({ spaces: stripActiveTabs(l.spaces), scratch: stripActiveTabs([l.scratch])[0], pinned: l.pinned, recent: l.recent })
+    synced.current = wire(l)
+    storeActiveTabs(pruneActiveTabs(activeTabsRef.current, [...l.spaces, l.scratch]))
     setSpaces(applyOwnActiveTabs(l.spaces, activeTabsRef.current))
     setScratch(applyOwnActiveTabs([l.scratch], activeTabsRef.current)[0])
     setPinned(l.pinned); setRecent(l.recent)
     setActiveSpaceId((a) => (a === ORCH || a === SCRATCH || a.startsWith('work:') || l.spaces.some((s) => s.id === a) ? a : ORCH))
     setLayoutSynced(true)
   }
+  // Sends `l` unless the server already has it. `synced` moves ahead at once so
+  // nothing echoes; a failed save puts it back, so the next change or connect retries.
+  function save(l: Layout) {
+    const j = wire(l)
+    if (j === synced.current) return
+    const prev = synced.current
+    synced.current = j
+    saving.current++
+    saveLayout(l, CLIENT_ID)
+      .catch(() => { if (synced.current === j) synced.current = prev })
+      .finally(() => { saving.current-- })
+  }
   // A browser's first sync folds in the spaces only it knows (they lived in its own
-  // localStorage, per origin); after that the server's layout wins outright.
+  // localStorage, per origin); after that the server's layout wins outright. No
+  // server layout yet: this browser's seeds it.
   useEffect(() => {
     getLayout().then(({ layout }) => {
       let first = false
       try { first = !localStorage.getItem(MERGED_KEY); localStorage.setItem(MERGED_KEY, '1') } catch {}
-      if (!layout) return // this browser's layout seeds the server
+      if (!layout) return setLayoutSynced(true)
       if (!first) return applyLayout(layout)
       const mine = mergeLocalSpaces(spaces, layout.spaces)
       applyLayout(layout)
@@ -237,14 +259,20 @@ export function App() {
   }, [])
   // The server pushes the current layout on every connect (so a reconnect resyncs)
   // and again whenever another browser saves; both land here.
-  useEffect(() => { if (remoteLayout) applyLayout(remoteLayout) }, [remoteLayout])
   useEffect(() => {
-    if (!hydrated || !layoutSynced) return
-    const l: Layout = { spaces, scratch, pinned, recent }
-    const j = JSON.stringify({ spaces: stripActiveTabs(l.spaces), scratch: stripActiveTabs([l.scratch])[0], pinned: l.pinned, recent: l.recent })
-    if (j === synced.current) return
-    synced.current = j
-    saveLayout(l, CLIENT_ID).catch(() => {})
+    if (!remoteLayout) return
+    const mine: Layout = { spaces, scratch, pinned, recent }
+    const { layout, connect } = remoteLayout
+    const action = remoteLayoutAction({ hasLayout: !!layout, connect, saving: saving.current > 0, dirty: hydrated && wire(mine) !== synced.current })
+    if (action === 'apply') return applyLayout(layout!)
+    if (action === 'seed') synced.current = ''
+    setLayoutSynced(true)
+    if (hydrated) save(mine)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remoteLayout])
+  useEffect(() => {
+    if (hydrated && layoutSynced) save({ spaces, scratch, pinned, recent })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated, layoutSynced, spaces, scratch, pinned, recent])
 
   // A work: view outlives its worker until the first 'spaces' message confirms
@@ -533,6 +561,12 @@ export function App() {
       <AppShell.Main>
         <div style={{ height: `calc(100dvh - ${HEADER_H}px)`, position: 'relative' }}>
           {/* Everything stays mounted; inactive views are hidden so PTY sessions survive a switch. */}
+          {!home && configErr && (activeSpaceId === ORCH || activeSpaceId === SCRATCH) && (
+            <Stack align="center" justify="center" h="100%" gap="xs">
+              <Text c="red" size="sm">Couldn't load the cockpit config: {configErr}</Text>
+              <Button size="xs" variant="light" onClick={() => setConfigRetry((n) => n + 1)}>Retry</Button>
+            </Stack>
+          )}
           {home && (
             <div style={{ position: 'absolute', inset: 0, display: activeSpaceId === ORCH ? 'block' : 'none' }}>
               <OrchestratorView home={home} repos={repos} surface={surface} workers={workers} reminders={reminders} active={activeSpaceId === ORCH} />

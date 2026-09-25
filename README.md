@@ -32,6 +32,7 @@ own, never merges, and never posts a review you didn't pick the verdict for.**
   approve it.
 - **Workers that ship PRs** — approved stories run in parallel where their dependencies allow.
   Each worker bootstraps its own worktree, implements, runs the tests, opens a PR and reports back.
+  Once a verifier approves a story PR, Jeeves reviews it once and hands you the review to post.
   `resolve <pr>` addresses review feedback on your own PRs and resolves the threads it fixed.
 - **A browser cockpit** — the orchestrator and dashboard side by side, plus real terminal spaces
   (`claude`, `codex`, shell) per branch, PR or worktree, each with a git panel of changes, PR
@@ -69,8 +70,9 @@ Type into the orchestrator pane, or fire the same commands from any dashboard ro
 | `plan <TICKET>` | Drafts a Confluence plan with a story breakdown and links it from the ticket. |
 | `approve <TICKET>` | Approves the plan: one worker per story, in parallel where dependencies allow. |
 | `change <TICKET>: …` | Revises the plan. Comments on the ticket work too. |
-| `review <pr>` | Reviews a teammate's PR with your review command (default `/code-review`). |
-| `comment` / `approve` / `request-changes <pr>` | Posts the finished review with that verdict. |
+| `review <pr>` | Reviews a PR with your review command (default `/code-review`) — a teammate's, or a re-review of your own. |
+| `comment` / `approve` / `request-changes <pr>` | Posts the finished review with that verdict (on your own PR, `comment` only). |
+| `drop <pr>` | Discards the finished review; nothing posts. |
 | `resolve <pr>` | Addresses change requests on your own PR, pushes, and resolves the threads. |
 | `qa <KEY>` | Prints the ticket's testing instructions. |
 | `run <agent> on <target>` | Runs one of your own agents on a ticket, PR or repo. |
@@ -78,8 +80,9 @@ Type into the orchestrator pane, or fire the same commands from any dashboard ro
 
 ## Get started
 
-**You'll need** Claude Code, Node.js 20+, the GitHub CLI signed in (`gh auth login`), the
-Atlassian Rovo MCP connected in Claude Code for Jira and Confluence, and a C/C++ toolchain for the
+**You'll need** Claude Code, Node.js 22.12+, the GitHub CLI signed in (`gh auth login`), an
+Atlassian MCP connected in Claude Code for Jira and Confluence (the claude.ai Atlassian Rovo
+connector by default; any other server is named in Settings), and a C/C++ toolchain for the
 terminal library (`xcode-select --install` on macOS, `build-essential` on Linux, Visual Studio
 Build Tools on Windows).
 

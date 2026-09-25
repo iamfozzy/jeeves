@@ -1,10 +1,10 @@
 // server.mjs over HTTP. It starts listening on import and keeps its state files
-// (.jeeves-orch-session, .jeeves-mcp.json, .jeeves-layout.json …) next to itself, so
-// the test runs a copy in a temp dir, with HOME and JEEVES_HOME pointing inside it,
-// and never touches a real cockpit.
+// (token, orch-session, layout.json …) in <data-home>/.cockpit, so the test runs a copy
+// in a temp dir, with HOME and JEEVES_HOME pointing inside it, and never touches a real
+// cockpit.
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
@@ -18,10 +18,13 @@ const tmp = mkdtempSync(join(tmpdir(), 'jeeves-server-'))
 const COCKPIT = join(tmp, 'cockpit')
 const HOME = join(tmp, 'home')
 const DATA = join(HOME, 'jeeves')
+const STATE = join(DATA, '.cockpit')
+// State an earlier version left beside server.mjs, adopted on the first boot.
+const LEGACY_ORCH_SESSION = '0f0f0f0f-1111-4222-8333-444444444444'
 // Stand-ins first on PATH: `claude` records its argv and the env vars in CLAUDE_ENV, then
 // exits (or, when its last argument contains [stay] or STAY exists, keeps running); `gh` logs its argv to
 // GH_LOG, answers every GraphQL search with no PRs, `api user` as "me", and `pr view <n>`
-// with a PR that is the user's own when n is 1.
+// with a PR that is the user's own when n is 1 or 3 (#3 titled "ABC-123 fix").
 const BIN = join(tmp, 'bin')
 const CLAUDE_ARGS = join(tmp, 'claude-args.json')
 const CLAUDE_ENV = join(tmp, 'claude-env.json')
@@ -31,7 +34,7 @@ const FAKE_GH = `const a = process.argv.slice(2)
 require('fs').appendFileSync(${JSON.stringify(GH_LOG)}, JSON.stringify(a) + '\\n')
 const q = (a.find((x) => x.startsWith('query=')) || '').slice(6), data = {}
 if (a[0] === 'api' && a[1] === 'user') process.stdout.write('me\\n')
-else if (a[0] === 'pr' && a[1] === 'view') process.stdout.write(JSON.stringify({ number: +a[2], author: { login: a[2] === '1' ? 'me' : 'someone' }, isDraft: false, title: 'fix it' }))
+else if (a[0] === 'pr' && a[1] === 'view') process.stdout.write(JSON.stringify({ number: +a[2], author: { login: ['1', '3'].includes(a[2]) ? 'me' : 'someone' }, isDraft: false, title: a[2] === '3' ? 'ABC-123 fix' : 'fix it' }))
 else if (a[0] === 'pr' && a[1] === 'edit') {}
 else {
   for (const m of q.matchAll(/(\\w+):search\\(/g)) data[m[1]] = { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] }
@@ -55,6 +58,8 @@ before(async () => {
   cpSync(join(ROOT, 'bin'), join(COCKPIT, 'bin'), { recursive: true })
   cpSync(join(ROOT, 'lib'), join(COCKPIT, 'lib'), { recursive: true })
   symlinkSync(join(ROOT, 'node_modules'), join(COCKPIT, 'node_modules'), 'junction')
+  writeFileSync(join(COCKPIT, '.jeeves-orch-session'), LEGACY_ORCH_SESSION)
+  mkdirSync(join(COCKPIT, '.jeeves-sessions')); writeFileSync(join(COCKPIT, '.jeeves-sessions', 'old.mcp.json'), '{}')
   mkdirSync(BIN)
   writeFileSync(join(BIN, 'claude'), `#!${process.execPath}\nconst fs = require('fs'), e = process.env
 fs.writeFileSync(${JSON.stringify(CLAUDE_ENV)}, JSON.stringify({ JEEVES_TOKEN: e.JEEVES_TOKEN ?? null, JEEVES_USAGE_URL: e.JEEVES_USAGE_URL ?? null, JEEVES_HOOK_URL: e.JEEVES_HOOK_URL ?? null, MAX_MCP_OUTPUT_TOKENS: e.MAX_MCP_OUTPUT_TOKENS, git: Object.fromEntries(Object.entries(e).filter(([k]) => k.startsWith('GIT_CONFIG_'))) }))
@@ -67,11 +72,12 @@ if (String(process.argv.at(-1)).includes('[stay]') || fs.existsSync(${JSON.strin
 })
 after(() => { srv?.kill(); rmSync(tmp, { recursive: true, force: true }) })
 
-// Start (or, after stop, restart) the server on `port`, with its state files where the last run left them.
-async function start() {
+// Start (or, after stop, restart) the server on `port`, with its state files where the last run left them
+// and any extra environment.
+async function start(extraEnv = {}) {
   srv = spawn(process.execPath, [join(COCKPIT, 'server.mjs')], {
     cwd: COCKPIT,
-    env: { ...process.env, PATH: `${BIN}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}`, HOME, USERPROFILE: HOME, PORT: String(port), JEEVES_TOKEN: TOKEN, JEEVES_HOME: DATA, JEEVES_SCRATCH_ROOT: '' },
+    env: { ...process.env, PATH: `${BIN}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}`, HOME, USERPROFILE: HOME, PORT: String(port), JEEVES_TOKEN: TOKEN, JEEVES_HOME: DATA, JEEVES_SCRATCH_ROOT: '', ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe']
   })
   let log = ''
@@ -230,7 +236,7 @@ test('a reviewer dispatch carries the project\'s review command', { skip: POSIX 
     assert.ok(out.workId, JSON.stringify(out))
     for (let i = 0; i < 50 && !existsSync(CLAUDE_ARGS); i++) await new Promise((r) => setTimeout(r, 100))
     const argv = JSON.parse(readFileSync(CLAUDE_ARGS, 'utf8'))
-    assert.equal(argv.at(-1), 'Review PR #7 against main.\n\nReview command for this project: /code-review high')
+    assert.deepEqual(argv.slice(-2), ['--', 'Review PR #7 against main.\n\nReview command for this project: /code-review high'])
     assert.equal(argv[argv.indexOf('--agent') + 1], 'reviewer')
   } finally { await client.close() }
 })
@@ -241,7 +247,7 @@ test('/api/layout', async (t) => {
     const layout = { spaces: [{ id: 's1', tabs: [] }], pinned: ['api'] }
     assert.deepEqual((await api('/api/layout', { layout, from: 'b1' })).body, { ok: true })
     assert.deepEqual((await api('/api/layout')).body, { layout })
-    assert.deepEqual(JSON.parse(readFileSync(join(COCKPIT, '.jeeves-layout.json'), 'utf8')), layout)
+    assert.deepEqual(JSON.parse(readFileSync(join(STATE, 'layout.json'), 'utf8')), layout)
   })
   await t.test('rejects bad input and keeps the saved layout', async () => {
     for (const body of [{}, { layout: 'x' }, { layout: {} }, { layout: { spaces: 'no' } }]) {
@@ -394,7 +400,61 @@ test('dispatch reuses a finished worktree, brought up to date, and never the mai
   } finally { await client.close() }
 })
 
-test('tick_snapshot is whole again after a compaction', { skip: POSIX !== true && POSIX }, async () => {
+test('dispatch onto a teammate\'s branch never fetched here checks out its pushed head', { skip: POSIX !== true && POSIX }, async () => {
+  const mate = join(tmp, 'mate')
+  execFileSync('git', ['clone', '-q', ORIGIN, mate], { stdio: 'ignore' })
+  git(mate, 'checkout', '-q', '-b', 'mate-pr'); git(mate, 'commit', '-q', '--allow-empty', '-m', 'their work'); git(mate, 'push', '-q', 'origin', 'mate-pr')
+  const { client, call } = await mcpClient()
+  try {
+    freshArgs()
+    const out = JSON.parse(await call('dispatch', { agent: 'reviewer', repo: 'demo', branch: 'mate-pr', prompt: 'Review PR #8.' }))
+    assert.ok(out.workId, JSON.stringify(out))
+    await claudeArgs()
+    assert.equal(git(out.cwd, 'rev-parse', 'HEAD'), git(mate, 'rev-parse', 'HEAD'))
+    assert.equal(git(out.cwd, 'rev-parse', '--abbrev-ref', '@{upstream}'), 'origin/mate-pr')
+  } finally { await client.close() }
+})
+
+test('dispatch moves a folder in the way aside, never deleting it', { skip: POSIX !== true && POSIX }, async () => {
+  const wt = join(`${REPO}-worktrees`, 'feat-left')
+  mkdirSync(wt, { recursive: true }); writeFileSync(join(wt, 'keep.txt'), 'mine')
+  const { client, call } = await mcpClient()
+  try {
+    freshArgs()
+    const out = JSON.parse(await call('dispatch', { agent: 'story-worker', repo: 'demo', branch: 'feat-left', prompt: 'x' }))
+    assert.ok(out.workId, JSON.stringify(out))
+    await claudeArgs()
+    assert.match(out.movedAside, /feat-left\.stale-\d{14}$/)
+    assert.equal(readFileSync(join(out.movedAside, 'keep.txt'), 'utf8'), 'mine')
+    assert.equal(git(out.cwd, 'rev-parse', '--abbrev-ref', 'HEAD'), 'feat-left')
+  } finally { await client.close() }
+})
+
+test('dispatch prunes a registered worktree whose folder is gone, then checks it out', { skip: POSIX !== true && POSIX }, async () => {
+  const wt = join(`${REPO}-worktrees`, 'feat-gone-wt')
+  git(REPO, 'worktree', 'add', '-q', '-b', 'feat-gone-wt', wt)
+  rmSync(wt, { recursive: true, force: true })
+  const { client, call } = await mcpClient()
+  try {
+    freshArgs()
+    const out = JSON.parse(await call('dispatch', { agent: 'story-worker', repo: 'demo', branch: 'feat-gone-wt', prompt: 'x' }))
+    assert.ok(out.workId, JSON.stringify(out))
+    await claudeArgs()
+    assert.equal(out.movedAside, undefined)
+    assert.equal(git(out.cwd, 'rev-parse', '--abbrev-ref', 'HEAD'), 'feat-gone-wt')
+    // Registered at the path under no branch (detached): git refuses the add, prune clears it.
+    const det = join(`${REPO}-worktrees`, 'feat-detached')
+    git(REPO, 'worktree', 'add', '-q', '--detach', det)
+    rmSync(det, { recursive: true, force: true })
+    freshArgs()
+    const again = JSON.parse(await call('dispatch', { agent: 'story-worker', repo: 'demo', branch: 'feat-detached', prompt: 'x' }))
+    assert.ok(again.workId, JSON.stringify(again))
+    await claudeArgs()
+    assert.equal(git(again.cwd, 'rev-parse', '--abbrev-ref', 'HEAD'), 'feat-detached')
+  } finally { await client.close() }
+})
+
+test('tick_snapshot is whole again after a compaction',{ skip: POSIX !== true && POSIX }, async () => {
   const { client, call } = await mcpClient()
   try {
     const tick = async () => Object.keys(JSON.parse(await call('tick_snapshot', {})))
@@ -435,6 +495,13 @@ test('/api/tab-prompt', { skip: POSIX !== true && POSIX }, async (t) => {
     assert.notEqual((await claudeArgs()).at(-1), '/jeeves:setup --scan')
     again.close()
   })
+  await t.test('a prompt starting with - follows --, so it is never read as a flag', async () => {
+    assert.equal((await api('/api/tab-prompt', { tabId: 'tp2abc', prompt: '- fix login' })).status, 200)
+    freshArgs()
+    const ws = await pty('scratch:tp2abc', 'claude')
+    assert.deepEqual((await claudeArgs()).slice(-2), ['--', '- fix login'])
+    ws.close()
+  })
 })
 
 test('orchestrator tabs: add_tab, inbox, close_tab, and a restart', { skip: POSIX !== true && POSIX }, async () => {
@@ -458,6 +525,7 @@ test('orchestrator tabs: add_tab, inbox, close_tab, and a restart', { skip: POSI
     const asked = await pty(`${spaceRef}:${tabRef}`, 'claude', cwd)
     assert.equal((await claudeArgs()).at(-1), 'why does X?', 'the first claude tab starts on the prompt')
     asked.close()
+    assert.equal((await tabs()).find((x) => x.tabRef === tabRef)?.prompt, 'why does X?', 'inbox lists the prompt it opened on')
     assert.ok((await mcp.raw('open_space', { repo: 'demo', command: 'ls', prompt: 'x' })).isError, 'a prompt is for a claude tab')
     assert.ok((await mcp.raw('open_space', { repo: 'demo', prompt: ' ' })).isError, 'an empty prompt')
 
@@ -508,7 +576,7 @@ test('/pty refuses with a fatal frame, then closes', async (t) => {
 // session's --settings, its per-session settings file; closing the session ends it too.
 // Stand-ins carry that path in their argv exactly as a real forked session does.
 test('closing a session ends background Claude processes carrying its hook id', { skip: process.platform === 'win32' && 'ps-based' }, async () => {
-  const marker = (id) => join(realpathSync(COCKPIT), '.jeeves-sessions', id.replace(':', '+') + '.settings.json')
+  const marker = (id) => join(STATE, 'sessions', id.replace(':', '+') + '.settings.json')
   const bg = (id) => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', '--', '--settings', marker(id)], { stdio: 'ignore', detached: true })
   const gone = (p) => { try { process.kill(p.pid, 0); return false } catch { return true } }
   const doomed = bg('bgt1:tab1'), other = bg('bgt1:tab2')
@@ -527,11 +595,17 @@ const rawReq = (path, headers = {}, method = 'GET', body) => new Promise((res, r
   const r = http.request({ host: '127.0.0.1', port, path, method, headers: { authorization: `Bearer ${TOKEN}`, ...headers } }, (x) => { let b = ''; x.on('data', (c) => (b += c)); x.on('end', () => res({ status: x.statusCode, body: b })) })
   r.on('error', rej); r.end(body)
 })
-const sessionsDir = () => join(COCKPIT, '.jeeves-sessions')
+const sessionsDir = () => join(STATE, 'sessions')
 const readJson = (f) => JSON.parse(readFileSync(f, 'utf8'))
 // The MCP token a launched session was minted, from its --mcp-config file.
 const mintedToken = (sid) => readJson(join(sessionsDir(), sid.replace(':', '+') + '.mcp.json')).mcpServers.cockpit.headers.Authorization.slice(7)
 const toolNames = async (c) => (await c.client.listTools()).tools.map((t) => t.name).sort()
+
+test('the first boot adopts the state an earlier version left beside server.mjs', () => {
+  assert.equal(readFileSync(join(STATE, 'orch-session'), 'utf8'), LEGACY_ORCH_SESSION)
+  assert.equal(existsSync(join(COCKPIT, '.jeeves-orch-session')), false, 'moved, not copied')
+  assert.equal(existsSync(join(COCKPIT, '.jeeves-sessions')), false, 'stale session files dropped')
+})
 
 test('unknown /api paths are a 404 JSON', async () => {
   const r = await api('/api/nope')
@@ -545,29 +619,24 @@ test('a body over 1 MB is a 413, and the server lives on', async () => {
   await alive()
 })
 
-test('only local Hosts and the cockpit\'s own Origin are served', async (t) => {
-  await t.test('a foreign Host is refused on HTTP', async () => {
-    assert.equal((await rawReq('/api/layout', { host: 'evil.example:' + port })).status, 403)
-    assert.equal((await rawReq('/', { host: 'evil.example' })).status, 403)
+test('a tunnel\'s Host and Origin are served; the token is the gate', async (t) => {
+  const tunnel = { host: 'abc123.ngrok-free.app', origin: 'https://abc123.ngrok-free.app' }
+  await t.test('HTTP under a tunnel hostname: served with the token, 401 without', async () => {
+    assert.equal((await rawReq('/api/layout', tunnel)).status, 200)
+    assert.equal((await rawReq('/', tunnel)).status, 200)
+    assert.equal((await rawReq('/api/layout', { ...tunnel, authorization: '' })).status, 401)
   })
-  await t.test('a foreign Origin is refused', async () => {
-    assert.equal((await rawReq('/api/layout', { origin: 'http://evil.example' })).status, 403)
-    assert.equal((await rawReq('/api/layout', { origin: 'null' })).status, 403)
-  })
-  await t.test('the cockpit\'s own origin, the dev UI and no origin are served', async () => {
-    for (const origin of [`http://localhost:${port}`, `http://127.0.0.1:${port}`, 'http://localhost:4178']) assert.equal((await rawReq('/api/layout', { origin })).status, 200, origin)
-    assert.equal((await rawReq('/api/layout', { host: `localhost:${port}` })).status, 200)
-  })
-  await t.test('/mcp refuses a foreign Host or Origin', async () => {
+  await t.test('/mcp under a tunnel hostname: served with a token, 401 without', async () => {
     const init = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } })
     const h = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }
-    assert.equal((await rawReq('/mcp', { ...h, host: 'evil.example' }, 'POST', init)).status, 403)
-    assert.equal((await rawReq('/mcp', { ...h, origin: 'http://evil.example' }, 'POST', init)).status, 403)
+    assert.equal((await rawReq('/mcp', { ...h, ...tunnel }, 'POST', init)).status, 200)
+    assert.equal((await rawReq('/mcp', { ...h, ...tunnel, authorization: '' }, 'POST', init)).status, 401)
   })
-  await t.test('a WebSocket upgrade with a foreign Origin is refused', async () => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/events?token=${TOKEN}`, { origin: 'http://evil.example' })
+  await t.test('a WebSocket under a tunnel Origin opens with the token', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/events?token=${TOKEN}`, { origin: tunnel.origin, headers: { host: tunnel.host } })
     const status = await new Promise((res) => { ws.on('unexpected-response', (_, r) => res(r.statusCode)); ws.on('open', () => res('open')); ws.on('error', () => res('error')) })
-    assert.equal(status, 403)
+    ws.close()
+    assert.equal(status, 'open')
   })
 })
 
@@ -622,14 +691,16 @@ test('sessions get their own MCP token, in a 0600 file, never in argv', { skip: 
       for (const secret of [TOKEN, token, new URL(env.JEEVES_HOOK_URL).searchParams.get('token'), new URL(env.JEEVES_USAGE_URL).searchParams.get('token')]) assert.ok(!all.includes(secret), 'a token leaked into argv')
       assert.doesNotMatch(all, /token=|Bearer/)
       assert.equal(env.MAX_MCP_OUTPUT_TOKENS, undefined, 'only the orchestrator raises the MCP output limit')
-      assert.match(argv[argv.indexOf('--mcp-config') + 1], /\.jeeves-sessions[\\/]work\+w[0-9a-f]+\.mcp\.json$/)
-      assert.match(argv[argv.indexOf('--settings') + 1], /\.jeeves-sessions[\\/]w[0-9a-f]+\.settings\.json$/)
+      assert.match(argv[argv.indexOf('--mcp-config') + 1], /[\\/]\.cockpit[\\/]sessions[\\/]work\+w[0-9a-f]+\.mcp\.json$/)
+      assert.match(argv[argv.indexOf('--settings') + 1], /[\\/]\.cockpit[\\/]sessions[\\/]w[0-9a-f]+\.settings\.json$/)
     })
-    await t.test('the session files and every .jeeves-* file are owner-only', () => {
-      const files = [...readdirSync(COCKPIT).filter((n) => n.startsWith('.jeeves-') && n !== '.jeeves-sessions').map((n) => join(COCKPIT, n)), ...readdirSync(sessionsDir()).map((n) => join(sessionsDir(), n))]
+    await t.test('the state dir is owner-only, and every file in it', () => {
+      assert.equal(lstatSync(STATE).mode & 0o777, 0o700)
+      assert.equal(lstatSync(sessionsDir()).mode & 0o777, 0o700)
+      const files = [...readdirSync(STATE).filter((n) => n !== 'sessions').map((n) => join(STATE, n)), ...readdirSync(sessionsDir()).map((n) => join(sessionsDir(), n))]
       assert.ok(files.length > 3)
       for (const f of files) assert.equal(lstatSync(f).mode & 0o777, 0o600, f)
-      assert.equal(existsSync(join(COCKPIT, '.jeeves-mcp.json')), false, 'no shared MCP config any more')
+      assert.deepEqual(readdirSync(COCKPIT).filter((n) => n.startsWith('.jeeves-')), [], 'nothing beside server.mjs')
     })
     worker = await mcpClient(token, '/mcp?role=&sid=orch:main') // a query string grants nothing
     await t.test('the role comes from the token, not the query string', async () => {
@@ -665,11 +736,17 @@ test('the orchestrator runs with a fixed tool list and every tool call guarded',
   ws.close()
   assert.equal(env.MAX_MCP_OUTPUT_TOKENS, '40000')
   assert.equal(argv.filter((a) => a.startsWith('--tools')).length, 1)
-  assert.equal(argv.find((a) => a.startsWith('--tools')), '--tools=Read,Grep,Glob,Edit,Write,Skill,ToolSearch,ScheduleWakeup,SendMessage,ListAgents,PushNotification')
+  assert.equal(argv.find((a) => a.startsWith('--tools')), '--tools=Read,Grep,Glob,Edit,Write,Bash,Skill,ToolSearch,ScheduleWakeup,SendMessage,ListAgents,PushNotification')
   assert.equal(argv.at(-1), '/jeeves:start')
   const settings = readJson(argv[argv.indexOf('--settings') + 1])
   assert.equal(settings.hooks.PreToolUse[0].matcher, '.*')
   assert.doesNotMatch(JSON.stringify(settings), /token/i)
+  // Claude Code runs the command through sh and blocks only on exit 2: a guard that can't run blocks too.
+  const cmd = settings.hooks.PreToolUse[0].hooks[0].command, guard = join(COCKPIT, 'bin', 'guard-orchestrator.mjs')
+  assert.ok(cmd.includes(guard), cmd)
+  const missing = spawnSync('sh', ['-c', cmd.replace(guard, join(tmp, 'no-such-guard.mjs'))], { input: '{}', encoding: 'utf8' })
+  assert.equal(missing.status, 2, missing.stderr)
+  assert.match(missing.stderr, /no-such-guard/, 'node\'s own error still reaches stderr')
 })
 
 test('/events primes a new client with the layout', async () => {
@@ -742,6 +819,8 @@ test('github_write touches only the user\'s own PRs', { skip: POSIX !== true && 
   try {
     assert.deepEqual(JSON.parse(await call('github_write', { action: 'retitle', repo: 'acme/demo', number: 1, key: 'ABC-7' })), { ok: true, title: '[ABC-7] fix it' })
     assert.deepEqual(ghCalls().at(-1), ['pr', 'edit', '1', '--repo', 'acme/demo', '--title=[ABC-7] fix it'])
+    assert.deepEqual(JSON.parse(await call('github_write', { action: 'retitle', repo: 'acme/demo', number: 3, key: 'ABC-12' })), { ok: true, title: '[ABC-12] ABC-123 fix' }, 'ABC-12 is not ABC-123')
+    assert.deepEqual(JSON.parse(await call('github_write', { action: 'retitle', repo: 'acme/demo', number: 3, key: 'ABC-123' })), { ok: true, title: 'ABC-123 fix', unchanged: true })
     const theirs = await raw('github_write', { action: 'retitle', repo: 'acme/demo', number: 2, key: 'ABC-7' })
     assert.ok(theirs.isError)
     assert.match(theirs.content[0].text, /someone's PR/)
@@ -876,6 +955,107 @@ test('tick_snapshot full flags repo-wide and Jira-overriding projects', { skip: 
     const plain = JSON.parse(await call('tick_snapshot', { full: true })).index.find((p) => p.id === 'demo')
     assert.deepEqual([plain.repoWide, plain.jiraOverride], [false, false])
   } finally { writeFileSync(f, was); await client.close() }
+})
+
+test('a file diff over 1 MB comes back whole', { skip: POSIX !== true && POSIX }, async () => {
+  const dir = join(HOME, 'bigdiff')
+  mkdirSync(dir, { recursive: true })
+  git(dir, 'init', '-q', '-b', 'main')
+  writeFileSync(join(dir, 'big.txt'), 'x'.repeat(99) + '\n'.repeat(1) + ('y'.repeat(99) + '\n').repeat(15000))
+  git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'big')
+  writeFileSync(join(dir, 'big.txt'), readFileSync(join(dir, 'big.txt'), 'utf8') + 'more\n')
+  const r = await api(`/api/filediff?cwd=${encodeURIComponent(dir)}&path=big.txt`)
+  assert.equal(r.body.old.length, 1500100, 'HEAD\'s side is read in full, not dropped as empty')
+  assert.equal(r.body.new.length, 1500105)
+})
+
+test('create_project stores values as update_config does, one create at a time', { skip: POSIX !== true && POSIX }, async () => {
+  const { client, call, raw } = await mcpClient()
+  const file = join(DATA, 'projects', 'np', 'project.md')
+  try {
+    for (const a of [{ repo: 'not a slug' }, { repo: 'acme/np', reviewCommand: '/review `x`' }, { repo: 'acme/np', path: REPO + '\nx' }, { repo: 'acme/np', jiraKey: 'ABC\n## Evil' }, { repo: 'acme/np', seedFiles: ['.env,x'] }, { repo: 'acme/np', baseBranch: '-x' }]) {
+      assert.ok((await raw('create_project', { id: 'np', path: REPO, ...a })).isError, JSON.stringify(a))
+    }
+    assert.equal(existsSync(file), false, 'a refused create writes nothing')
+    const both = await Promise.all([1, 2].map(() => raw('create_project', { id: 'np', repo: 'acme/np', path: REPO, seedFiles: ['.env', ' .npmrc '] })))
+    assert.deepEqual(both.map((r) => !!r.isError).sort(), [false, true], 'exactly one of two racing creates wins')
+    assert.match(readFileSync(file, 'utf8'), /seedFiles: \.env, \.npmrc/)
+    await call('delete_project', { id: 'np' })
+  } finally { await client.close() }
+})
+
+test('a request body cut off mid-way leaves the server serving', async () => {
+  await new Promise((res) => {
+    const c = net.connect(port, '127.0.0.1', () => {
+      c.write(`POST /api/layout HTTP/1.1\r\nhost: 127.0.0.1:${port}\r\nauthorization: Bearer ${TOKEN}\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{"layout":`)
+      setTimeout(() => { c.destroy(); res() }, 100)
+    })
+  })
+  await sleep(100)
+  await alive()
+})
+
+test('an upload never overwrites a file, and never the folder\'s .gitignore', async () => {
+  const dir = join(HOME, 'up')
+  mkdirSync(dir, { recursive: true })
+  const up = (name, body) => fetch(`${base}/api/upload?cwd=${encodeURIComponent(dir)}&name=${encodeURIComponent(name)}`, { method: 'POST', headers: { authorization: `Bearer ${TOKEN}` }, body }).then(async (r) => ({ status: r.status, body: await r.json() }))
+  const paths = []
+  for (const body of ['one', 'two', 'three']) paths.push((await up('notes.txt', body)).body.path)
+  assert.deepEqual(paths, ['notes.txt', 'notes-1.txt', 'notes-2.txt'].map((n) => join('.jeeves-uploads', n)))
+  assert.deepEqual(paths.map((p) => readFileSync(join(dir, p), 'utf8')), ['one', 'two', 'three'])
+  assert.equal((await up('.env', 'a')).body.path, join('.jeeves-uploads', '.env'))
+  assert.equal((await up('.env', 'b')).body.path, join('.jeeves-uploads', '.env-1'))
+  for (const name of ['.gitignore', 'x/.GITIGNORE']) assert.equal((await up(name, 'oops')).status, 400, name)
+  assert.equal(readFileSync(join(dir, '.jeeves-uploads', '.gitignore'), 'utf8').trim(), '*')
+})
+
+test('a killed session\'s MCP token and --mcp-config go with it', { skip: POSIX !== true && POSIX }, async () => {
+  await api('/api/tab-prompt', { tabId: 'kt1abc', prompt: 'hold [stay]' })
+  freshArgs()
+  const ws = await pty('kt:kt1abc', 'claude')
+  await claudeArgs()
+  const token = mintedToken('kt:kt1abc'), f = join(sessionsDir(), 'kt+kt1abc.mcp.json')
+  const mcp = () => rawReq('/mcp', { authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, 'POST', '{}')
+  assert.notEqual((await mcp()).status, 401)
+  ws.send(JSON.stringify({ t: 'kill' }))
+  await until('the token to be revoked', async () => (await mcp()).status === 401)
+  assert.equal(existsSync(f), false)
+  ws.close()
+  await fetch(`${base}/api/session?sid=kt:kt1abc`, { method: 'DELETE', headers: { authorization: `Bearer ${TOKEN}` } })
+})
+
+test('a worker respawns in its own worktree, whatever folder the pane names', { skip: POSIX !== true && POSIX }, async () => {
+  const { client, call } = await mcpClient()
+  try {
+    freshArgs()
+    const w = JSON.parse(await call('dispatch', { agent: 'story-worker', repo: 'demo', branch: 'respawn-cwd', prompt: 'x' }))
+    await claudeArgs()
+    await until('the worker to exit', async () => (await api('/api/spaces')).body.spaces.find((x) => x.workId === w.workId)?.status === 'exited')
+    const ws = await pty(w.sid, 'worker', HOME) // no transcript, so a shell
+    await sleep(300)
+    ws.send(JSON.stringify({ t: 'i', d: 'pwd -P\r' }))
+    await until('the shell to print its folder', () => ws.msgs.filter((m) => m.t === 'o').map((m) => m.d).join('').includes(realpathSync(w.cwd)))
+    ws.close()
+    await call('close_work', { workId: w.workId, removeWorktree: true })
+  } finally { await client.close() }
+})
+
+test('sessions reach the server on loopback when it listens on every address', { skip: POSIX !== true && POSIX }, async () => {
+  await stop(); await start({ HOST: '0.0.0.0' })
+  try {
+    try { unlinkSync(CLAUDE_ENV) } catch {}
+    await api('/api/tab-prompt', { tabId: 'hs1abc', prompt: 'hold [stay]' })
+    const ws = await pty('hs:hs1abc', 'claude')
+    await until('a claude to run', () => existsSync(CLAUDE_ENV))
+    const env = readJson(CLAUDE_ENV), self = `http://127.0.0.1:${port}/`
+    for (const u of [env.JEEVES_HOOK_URL, env.JEEVES_USAGE_URL]) assert.ok(u.startsWith(self), u)
+    assert.equal(readJson(join(sessionsDir(), 'hs+hs1abc.mcp.json')).mcpServers.cockpit.url, self + 'mcp')
+    ws.close()
+    await fetch(`${base}/api/session?sid=hs:hs1abc`, { method: 'DELETE', headers: { authorization: `Bearer ${TOKEN}` } })
+  } finally {
+    try { unlinkSync(CLAUDE_ENV) } catch {} // its hook token was this run's; hook() relaunches for the next
+    await stop(); await start()
+  }
 })
 
 // Last: it runs the orchestrator on a one-second tick.

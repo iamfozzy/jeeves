@@ -40,6 +40,16 @@ test('renders dir, model, effort, context and both limits with time to reset', a
   assert.equal(l2, 'ctx 13% · 5h 41% (2h14m) · 7d 7% (3d4h)')
 })
 
+test('JSON written after the script has started is still read', async () => {
+  const { out } = await new Promise((done) => {
+    const p = spawn(process.execPath, [SCRIPT], { env: { ...process.env, HOME: mkdtempSync(join(tmpdir(), 'sl-')) } })
+    let out = ''; p.stdout.on('data', (d) => { out += d })
+    p.on('close', (code) => done({ code, out }))
+    setTimeout(() => p.stdin.end(INPUT), 300)
+  })
+  assert.match(plain(out).split('\n')[0], /^proj:.* · Opus 5\.5 \/ high$/)
+})
+
 test('empty and garbage input still exit 0', async () => {
   assert.equal((await run([], '{}')).code, 0)
   assert.equal((await run([], 'not json')).code, 0)
@@ -68,6 +78,19 @@ test('--relay renders its own line when the user status line is this script, or 
   try {
     const { out } = await run(['--relay'], INPUT, { HOME: home })
     assert.match(plain(out), /ctx 13% · 5h 41%/)
+  } finally { rmSync(home, { recursive: true, force: true }) }
+})
+
+test('--relay chains a user status line merely named statusline.mjs — only jeeves-statusline.mjs is this script', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sl-'))
+  mkdirSync(join(home, '.claude'))
+  const userScript = join(home, '.claude', 'statusline.mjs')
+  writeFileSync(userScript, "process.stdout.write('MINE')\n")
+  writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ statusLine: { command: `"${process.execPath}" "${userScript}"` } }))
+  try {
+    const { code, out } = await run(['--relay'], INPUT, { HOME: home })
+    assert.equal(code, 0)
+    assert.equal(out.trim(), 'MINE')
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 

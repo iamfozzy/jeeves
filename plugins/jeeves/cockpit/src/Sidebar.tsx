@@ -235,7 +235,7 @@ export function Sidebar({
         className="ck-space"
         data-active={active}
         onClick={() => onSelectSpace(s.id)}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectSpace(s.id) } }}
+        onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectSpace(s.id) } }}
         // Indented under its repo (or Folders) header, clear of the tree line; the highlight stays full width.
         style={{ padding: '7px 12px 7px 20px', ...(active ? { background: 'var(--ck-active)' } : {}) }}
       >
@@ -390,7 +390,7 @@ export function Sidebar({
                   className="ck-space"
                   data-active={active}
                   onClick={() => onSelectSpace('work:' + w.workId)}
-                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectSpace('work:' + w.workId) } }}
+                  onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectSpace('work:' + w.workId) } }}
                   style={{ padding: '7px 12px', ...(active ? { background: 'var(--ck-active)' } : {}) }}
                 >
                   <Group gap={9} wrap="nowrap">

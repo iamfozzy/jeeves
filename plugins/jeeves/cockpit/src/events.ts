@@ -25,9 +25,10 @@ export function useCockpitEvents() {
   // add_tab / close_space commands targeting an open space (by spaceRef or id), and
   // close_tab by the tab's id.
   const [spaceCmds, setSpaceCmds] = useState<SpaceCmd[]>([])
-  // The shared layout: on every connect the server pushes the current one (so a
-  // reconnect resyncs), and again whenever another browser saves.
-  const [remoteLayout, setRemoteLayout] = useState<Layout | null>(null)
+  // The shared layout: on every connect the server pushes the current one (null when
+  // none is saved; `connect` marks that push, so a reconnect resyncs), and again
+  // whenever another browser saves. A fresh object per push, so each one lands.
+  const [remoteLayout, setRemoteLayout] = useState<{ layout: Layout | null; connect: boolean } | null>(null)
   // Bumped on every successful socket open (first connect included), so a consumer
   // can tell a fresh connection from a message that arrived on the same one — e.g.
   // to hold off saving the layout until this connection's own resync has landed.
@@ -56,7 +57,7 @@ export function useCockpitEvents() {
           else if (m.t === 'sessionStatus') setSessions((prev) => ({ ...prev, [m.sid]: m.status }))
           else if (m.t === 'config') setConfigNonce((n) => n + 1)
           else if (m.t === 'reminders') setReminders(m.reminders || [])
-          else if (m.t === 'layout' && m.layout && m.from !== CLIENT_ID) setRemoteLayout(m.layout)
+          else if (m.t === 'layout' && m.from !== CLIENT_ID) setRemoteLayout({ layout: m.layout ?? null, connect: !m.from })
           else if (m.t === 'open_space' && m.cmd) setOpenCmds((prev) => [...prev.slice(-19), m.cmd])
           else if (((m.t === 'add_tab' || m.t === 'close_space') && (m.spaceRef || m.spaceId)) || (m.t === 'close_tab' && m.tabId))
             setSpaceCmds((prev) => [...prev.slice(-19), { id: rid(), t: m.t, spaceRef: m.spaceRef, spaceId: m.spaceId, tabId: m.tabId, kind: m.kind, tab: m.tab, open: m.open }])

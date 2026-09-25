@@ -71,14 +71,19 @@ export const Dashboard = memo(function Dashboard({ repos, surface, workers, remi
   // Reminder dots and "overdue" follow the clock, so re-render every minute.
   const [now, setNow] = useState(Date.now())
   useEffect(() => { const t = window.setInterval(() => setNow(Date.now()), 60e3); return () => clearInterval(t) }, [])
-  const [sent, setSent] = useState<string | null>(null)
+  const [note, setNote] = useState<{ k: string; err?: string } | null>(null)
   const [prModal, setPrModal] = useState<{ repoId: string; number: string | number; title?: string } | null>(null)
-  const flash = (k: string) => { setSent(k); window.setTimeout(() => setSent((s) => (s === k ? null : s)), 1400) }
-  // The ✓ only flashes once the orchestrator actually took the input — not on a
-  // request that never reached it.
-  const fire = (a: SurfaceAction) => {
+  // Row `k`'s ⋮ flashes ✓ once its action actually landed, or ! with the error
+  // (a refusal or a request that never got through).
+  const flash = (k: string, err?: string) => {
+    const n = { k, err }
+    setNote(n)
+    window.setTimeout(() => setNote((c) => (c === n ? null : c)), err ? 4000 : 1400)
+  }
+  const failed = (k: string) => (e: unknown) => flash(k, e instanceof Error ? e.message : String(e))
+  const fire = (a: SurfaceAction, k: string) => {
     if (!a.run) return
-    sendOrchInput(a.run, !a.type).then((r) => { if (!r.error) flash(a.run!) }).catch(() => {})
+    sendOrchInput(a.run, !a.type).then((r) => flash(k, r.error)).catch(failed(k))
   }
 
   // Open a PR/review row's description in a modal. Only when the repo resolves.
@@ -163,15 +168,15 @@ export const Dashboard = memo(function Dashboard({ repos, surface, workers, remi
 
   // Reminders are personal, not per repo: every row of reminders.md, never filtered or
   // folded, always on top, soonest first. Done and snooze edit the file directly.
-  const remind = (op: Parameters<typeof editReminder>[0]) => { editReminder(op).catch(() => {}) }
+  const remind = (k: string, op: Parameters<typeof editReminder>[0]) => { editReminder(op).then((r) => flash(k, 'error' in r ? r.error : undefined)).catch(failed(k)) }
   const reminders = [...rows].sort((a, b) => a.due.localeCompare(b.due)).map((r) => {
     const ms = dueAt(r.due) - now
     return {
       id: r.id, item: r.what, due: whenDue(r.due, ms), dot: (ms <= 0 ? 'red' : ms < 864e5 ? 'yellow' : undefined) as Dot | undefined,
       actions: [
-        { label: 'Done', onPick: () => remind({ op: 'done', id: r.id }) },
-        { label: 'Snooze 1h', onPick: () => remind({ op: 'snooze', id: r.id, by: '1h' }) },
-        { label: 'Snooze 1d', onPick: () => remind({ op: 'snooze', id: r.id, by: '1d' }) }
+        { label: 'Done', onPick: () => remind(r.id, { op: 'done', id: r.id }) },
+        { label: 'Snooze 1h', onPick: () => remind(r.id, { op: 'snooze', id: r.id, by: '1h' }) },
+        { label: 'Snooze 1d', onPick: () => remind(r.id, { op: 'snooze', id: r.id, by: '1d' }) }
       ] as SurfaceAction[]
     }
   })
@@ -213,7 +218,7 @@ export const Dashboard = memo(function Dashboard({ repos, surface, workers, remi
           </Group>
           <Group gap={6} wrap="nowrap" align="center" style={{ flex: 'none' }}>
             {right}
-            <Actions actions={actions} repo={repoFor(repo)} ghNum={ghNum} sent={sent} fire={fire} />
+            <Actions actions={actions} repo={repoFor(repo)} ghNum={ghNum} note={note?.k === k ? note : null} fire={(a) => fire(a, k)} />
           </Group>
         </Group>
       </Box>
@@ -385,22 +390,27 @@ function ChecksIcon({ checks }: { checks?: Checks }) {
 }
 
 // Per-row actions: everything — Approve / Resolve / Test / … plus "Open PR on
-// GitHub" — lives in the ⋮ menu; no standalone buttons. A ✓ flashes when one fires.
-function Actions({ actions, repo, ghNum, sent, fire }: {
+// GitHub" — lives in the ⋮ menu; no standalone buttons. A ✓ flashes when one lands,
+// a ! with its error when one fails.
+function Actions({ actions, repo, ghNum, note, fire }: {
   actions?: SurfaceAction[]; repo?: RepoCfg; ghNum?: string | number
-  sent: string | null; fire: (a: SurfaceAction) => void
+  note: { err?: string } | null; fire: (a: SurfaceAction) => void
 }) {
   const list = (actions ?? []).filter((a) => !a.href || isHttpUrl(a.href)) // a non-http(s) link is dropped
   const ghHref = ghNum != null && repo ? `https://github.com/${repo.slug}/pull/${String(ghNum).replace(/^#/, '')}` : null
   if (!list.length && !ghHref) return null
-  const flashing = list.some((a) => a.run === sent)
+  const err = note?.err
 
   return (
     <Menu shadow="md" width={230} position="bottom-end" withinPortal>
       <Menu.Target>
-        <ActionIcon variant="subtle" color={flashing ? 'teal' : 'gray'} size="sm" aria-label="Actions">
-          {flashing ? <Text size="sm" c="teal" lh={1}>✓</Text> : <span style={{ fontSize: 16, lineHeight: 1 }}>⋮</span>}
-        </ActionIcon>
+        <Tooltip label={err} opened={!!err} disabled={!err} color="red" withinPortal>
+          <ActionIcon variant="subtle" color={err ? 'red' : note ? 'teal' : 'gray'} size="sm" aria-label="Actions">
+            {err ? <Text size="sm" c="red" fw={700} lh={1}>!</Text>
+              : note ? <Text size="sm" c="teal" lh={1}>✓</Text>
+              : <span style={{ fontSize: 16, lineHeight: 1 }}>⋮</span>}
+          </ActionIcon>
+        </Tooltip>
       </Menu.Target>
       <Menu.Dropdown>
         {list.length ? <Menu.Label>Actions</Menu.Label> : null}

@@ -50,6 +50,13 @@ export const SpaceView = memo(function SpaceView({
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [confirmId, setConfirmId] = useState<string | null>(null) // the tab whose close is being confirmed
+  // Open in VS Code / reveal: a refusal or failure shows in that button's tooltip for a few seconds.
+  const [openErr, setOpenErr] = useState<{ target: 'editor' | 'files'; msg: string } | null>(null)
+  const open = (target: 'editor' | 'files') => {
+    const fail = (msg: string) => { const n = { target, msg }; setOpenErr(n); window.setTimeout(() => setOpenErr((c) => (c === n ? null : c)), 4000) }
+    openFolder(space.cwd, target).then((r) => { if (r.error) fail(r.error) }).catch((e) => fail(e instanceof Error ? e.message : String(e)))
+  }
+  const errFor = (target: 'editor' | 'files') => (openErr?.target === target ? openErr.msg : null)
   // Drag to reorder: the tab being dragged, and where it would land (either side of a tab).
   const [dragId, setDragId] = useState<string | null>(null)
   const [drop, setDrop] = useState<{ id: string; after: boolean } | null>(null)
@@ -160,13 +167,13 @@ export const SpaceView = memo(function SpaceView({
         </Group>
 
         <Group gap={2} px={6} wrap="nowrap" style={{ flex: 'none' }}>
-          <Tooltip label="Open in VS Code" openDelay={400} withArrow>
-            <ActionIcon variant="subtle" color="gray" size="md" onClick={() => openFolder(space.cwd, 'editor').catch(() => {})} aria-label="Open in VS Code">
+          <Tooltip label={errFor('editor') ?? 'Open in VS Code'} opened={errFor('editor') ? true : undefined} color={errFor('editor') ? 'red' : undefined} openDelay={400} withArrow>
+            <ActionIcon variant="subtle" color="gray" size="md" onClick={() => open('editor')} aria-label="Open in VS Code">
               <IconBrandVscode size={17} />
             </ActionIcon>
           </Tooltip>
-          <Tooltip label={`Reveal in ${FILE_MANAGER}`} openDelay={400} withArrow>
-            <ActionIcon variant="subtle" color="gray" size="md" onClick={() => openFolder(space.cwd, 'files').catch(() => {})} aria-label={`Reveal in ${FILE_MANAGER}`}>
+          <Tooltip label={errFor('files') ?? `Reveal in ${FILE_MANAGER}`} opened={errFor('files') ? true : undefined} color={errFor('files') ? 'red' : undefined} openDelay={400} withArrow>
+            <ActionIcon variant="subtle" color="gray" size="md" onClick={() => open('files')} aria-label={`Reveal in ${FILE_MANAGER}`}>
               <IconFolderOpen size={17} />
             </ActionIcon>
           </Tooltip>

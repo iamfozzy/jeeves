@@ -1,7 +1,7 @@
 import http from 'node:http'
 import os from 'node:os'
 import { readFile, writeFile, unlink } from 'node:fs/promises'
-import { chmodSync, existsSync, readFileSync, readdirSync, copyFileSync, mkdirSync, realpathSync, renameSync, statSync, unlinkSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, readdirSync, copyFileSync, mkdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, extname, normalize, basename, resolve, sep } from 'node:path'
 import { createRequire } from 'node:module'
@@ -22,7 +22,11 @@ const pty = require('node-pty')
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const PORT = process.env.PORT || 4177
-const HOST = process.env.HOST || '127.0.0.1' // loopback only — never LAN-exposed
+// Binds loopback; a tunnel (ngrok and the like) can front it under any hostname, since
+// every route and socket is token-gated rather than Host-gated.
+const HOST = process.env.HOST || '127.0.0.1'
+// Where this process's own sessions reach it: loopback for a wildcard HOST, an IPv6 literal bracketed.
+const SELF_URL = `http://${['0.0.0.0', '::', ''].includes(HOST) ? '127.0.0.1' : HOST.includes(':') ? `[${HOST}]` : HOST}:${PORT}`
 const WIN = process.platform === 'win32'
 const SHELL = process.env.SHELL || (WIN ? 'powershell.exe' : 'bash')
 // The orchestrator's neutral home = the Jeeves data home (matches bin/jeeves and
@@ -34,18 +38,44 @@ const DIST = join(__dirname, 'dist')
 process.on('uncaughtException', (e) => console.error('cockpit: uncaught exception:', e))
 process.on('unhandledRejection', (e) => console.error('cockpit: unhandled rejection:', e))
 
+// ── Runtime state: <data-home>/.cockpit ─────────────────────────────────────
+// The token, session ids, workers, tabs and layout live in the data home, never in the
+// plugin folder: a plugin update installs a new versioned folder, and the dev server
+// serves the cockpit folder as-is. Owner-only: the dir 0700, every file in it 0600.
+const STATE_DIR = join(NEUTRAL, '.cockpit')
+const PRIVATE = 0o600
+// Files an earlier version kept beside server.mjs, and their names here.
+const LEGACY_STATE = { '.jeeves-token': 'token', '.jeeves-orch-session': 'orch-session', '.jeeves-workers.json': 'workers.json', '.jeeves-tabs.json': 'tabs.json', '.jeeves-layout.json': 'layout.json', '.jeeves-orch-tabs.json': 'orch-tabs.json' }
+// On the first boot with no state dir, adopt that state from the cockpit folder that ran
+// last: this one (a checkout), or a sibling version in the plugin cache. Moved, not copied,
+// so no token stays behind in a folder the dev server serves.
+function adoptLegacyState() {
+  if (existsSync(STATE_DIR)) return
+  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
+  const lastBoot = (d) => { try { return statSync(join(d, '.jeeves-orch-session')).mtimeMs } catch { return -1 } }
+  let dirs = [__dirname]
+  try { dirs.push(...readdirSync(join(__dirname, '..', '..')).map((v) => join(__dirname, '..', '..', v, 'cockpit'))) } catch {}
+  const from = dirs.sort((a, b) => lastBoot(b) - lastBoot(a))[0]
+  if (lastBoot(from) < 0) return
+  for (const [old, now] of Object.entries(LEGACY_STATE)) {
+    const src = join(from, old), dst = join(STATE_DIR, now)
+    try { renameSync(src, dst) } catch { try { copyFileSync(src, dst); unlinkSync(src) } catch {} }
+  }
+  // Session files are rewritten at every spawn; the old ones hold stale tokens.
+  try { rmSync(join(from, '.jeeves-sessions'), { recursive: true, force: true }) } catch {}
+}
+adoptLegacyState()
+
 // ── Local access token ───────────────────────────────────────────────────────
 // The server is loopback-only, but a token still blocks any other local process
 // (or a browser tricked into POSTing to localhost) from driving PTYs. Taken from
-// $JEEVES_TOKEN, else persisted to .jeeves-token so restarts keep the same value
+// $JEEVES_TOKEN, else persisted to <state>/token so restarts keep the same value
 // and an open browser tab stays valid. Settings → Cockpit can rotate the persisted
 // one. Sessions this process spawns never see it: each gets its own MCP token (minted
 // at spawn, see mintMcpToken), and their hooks and status line relay carry narrow
 // tokens that each authorise one endpoint. No token ever travels in argv: session
-// config goes in 0600 files under .jeeves-sessions/, tokens in the PTY environment.
-const TOKEN_FILE = join(__dirname, '.jeeves-token')
-// Every .jeeves-* file here holds a token, a session id or the user's layout: owner-only.
-const PRIVATE = 0o600
+// config goes in 0600 files under <state>/sessions/, tokens in the PTY environment.
+const TOKEN_FILE = join(STATE_DIR, 'token')
 let TOKEN = (() => {
   if (process.env.JEEVES_TOKEN) return process.env.JEEVES_TOKEN
   try { const t = readFileSync(TOKEN_FILE, 'utf8').trim(); if (t) return t } catch {}
@@ -62,7 +92,7 @@ const sameToken = (provided, t) => { const a = Buffer.from(String(provided ?? ''
 const bearer = (req) => { const h = req.headers['authorization'] || ''; return h.startsWith('Bearer ') ? h.slice(7) : null }
 // The browser token, from the Authorization header or ?token= (a WebSocket can't set headers).
 const authed = (req, url) => sameToken(bearer(req) || url.searchParams.get('token'), TOKEN)
-// A fresh browser token, persisted to .jeeves-token; the old one stops working at once,
+// A fresh browser token, persisted to <state>/token; the old one stops working at once,
 // and every socket opened with it is closed.
 async function rotateToken() {
   if (process.env.JEEVES_TOKEN) return { error: 'the token is pinned by $JEEVES_TOKEN' }
@@ -121,9 +151,13 @@ const COCKPIT_SPEC = {
   detachMinutes: { dflt: 30, range: [0, 10080] },                           // reap a detached user tab after this; 0 = never
   uiFont: { env: 'JEEVES_UI_FONT', dflt: 'Roboto', font: true },       // a Google Font family, or `system`
   monoFont: { env: 'JEEVES_MONO_FONT', dflt: 'Roboto Mono', font: true },
-  terminalFontSize: { env: 'JEEVES_TERMINAL_FONT_SIZE', dflt: 13, range: [10, 20] }
+  terminalFontSize: { env: 'JEEVES_TERMINAL_FONT_SIZE', dflt: 13, range: [10, 20] },
+  // The MCP server the loop uses for Jira and Confluence, as its tool names spell it
+  // (mcp__<name>__getJiraIssue): the claude.ai connector by default, or one added with `claude mcp add`.
+  atlassianServer: { env: 'JEEVES_ATLASSIAN_SERVER', dflt: 'claude_ai_Atlassian_Rovo', name: true }
 }
 const FONT_NAME = /^[A-Za-z0-9 -]{1,60}$/ // a Google Font family name; the browser builds the stylesheet URL from it
+const SERVER_NAME = /^[A-Za-z0-9_-]{1,64}$/ // an MCP server name as it appears in tool names
 const COCKPIT_FILE = join(NEUTRAL, 'cockpit.json')
 // A submitted value as cockpit.json stores it, or { error }. Numbers may arrive as digit strings.
 function cockpitValue(key, v) {
@@ -136,6 +170,10 @@ function cockpitValue(key, v) {
   if (s.font) {
     const f = typeof v === 'string' ? v.trim().replace(/\s+/g, ' ') : ''
     return FONT_NAME.test(f) ? { value: f } : { error: `${key} must be a Google Font family name (letters, digits, spaces, -; up to 60) or system` }
+  }
+  if (s.name) {
+    const n = typeof v === 'string' ? v.trim() : ''
+    return SERVER_NAME.test(n) ? { value: n } : { error: `${key} must be an MCP server name as its tool names spell it (letters, digits, _ and -; up to 64)` }
   }
   return s.choices.includes(v) ? { value: v } : { error: `${key} must be one of ${s.choices.join(', ')}` }
 }
@@ -205,7 +243,7 @@ async function writeCockpitNow({ set = {}, unset = [] } = {}) {
 // exactly which transcript to read for its context usage.
 // Persisted, so a server restart resumes the same conversation; follows /clear via
 // the SessionStart hook.
-const ORCH_SESSION_FILE = join(__dirname, '.jeeves-orch-session')
+const ORCH_SESSION_FILE = join(STATE_DIR, 'orch-session')
 let ORCH_SESSION_ID = process.env.JEEVES_ORCH_SESSION_ID || (() => {
   try { const id = readFileSync(ORCH_SESSION_FILE, 'utf8').trim(); if (/^[0-9a-f-]{36}$/i.test(id)) return id } catch {}
   return randomUUID()
@@ -224,7 +262,7 @@ const ORCH_NAME = process.env.JEEVES_ORCH_NAME || 'jeeves-orchestrator'
 const CTX_WINDOW = +(process.env.JEEVES_CTX_WINDOW || 1000000) // orchestrator context window for the ctx% badge (default 1M)
 // Per-session files: each launched claude's --mcp-config and --settings, passed by
 // path so no token is ever on a command line. Named by the session's id.
-const SESSIONS_DIR = join(__dirname, '.jeeves-sessions')
+const SESSIONS_DIR = join(STATE_DIR, 'sessions')
 const sessionFile = (id, ext) => join(SESSIONS_DIR, String(id).replace(/[^A-Za-z0-9_.-]/g, '+') + ext)
 function writeSessionFile(id, ext, obj) {
   mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 })
@@ -249,7 +287,7 @@ function revokeMcpToken(t) {
 }
 // The session's --mcp-config file, with a fresh token for it.
 const mcpConfig = (role, caller) => writeSessionFile(caller, '.mcp.json', {
-  mcpServers: { cockpit: { type: 'http', url: `http://${HOST}:${PORT}/mcp`, headers: { Authorization: `Bearer ${mintMcpToken(role, caller)}` } } }
+  mcpServers: { cockpit: { type: 'http', url: `${SELF_URL}/mcp`, headers: { Authorization: `Bearer ${mintMcpToken(role, caller)}` } } }
 })
 
 // Bus state: the last surface the orchestrator painted and the dispatched worker
@@ -264,8 +302,8 @@ const workerList = () => [...bus.workers.values()]
 // next attach: the orchestrator already resumes; workers and user claude tabs get
 // a stable session id here so `claude --resume` restores their conversation.
 // Shell/codex tabs have nothing to resume — they respawn fresh.
-const WORKERS_FILE = join(__dirname, '.jeeves-workers.json')
-const TABS_FILE = join(__dirname, '.jeeves-tabs.json')
+const WORKERS_FILE = join(STATE_DIR, 'workers.json')
+const TABS_FILE = join(STATE_DIR, 'tabs.json')
 function saveWorkers() { try { atomicWrite(WORKERS_FILE, JSON.stringify(workerList()), PRIVATE) } catch {} }
 // tab sid ("space:tab") → { sessionId, cwd }, so a claude tab resumes after a restart.
 const tabSessions = new Map()
@@ -273,7 +311,7 @@ function saveTabs() { try { atomicWrite(TABS_FILE, JSON.stringify([...tabSession
 // The user's layout — open spaces and their tabs, the Scratchpad, pinned and recent
 // repos. The server owns it, not the browser, so every origin that serves the UI
 // (vite in dev, the built bundle here) shows the same spaces.
-const LAYOUT_FILE = join(__dirname, '.jeeves-layout.json')
+const LAYOUT_FILE = join(STATE_DIR, 'layout.json')
 let layout = null
 function saveLayout(next) { layout = next; try { atomicWrite(LAYOUT_FILE, JSON.stringify(next), PRIVATE) } catch {} }
 
@@ -341,7 +379,7 @@ const TAB_ID = /^[a-z0-9]{4,16}$/
 // Persisted; an entry goes on close_tab, when the user closes the tab (DELETE /api/session),
 // or once a saved layout no longer has it (after ORCH_TAB_GRACE_MS, so a layout saved
 // before the browser added the tab never drops it).
-const ORCH_TABS_FILE = join(__dirname, '.jeeves-orch-tabs.json')
+const ORCH_TABS_FILE = join(STATE_DIR, 'orch-tabs.json')
 const ORCH_TAB_GRACE_MS = 60e3
 const orchTabs = new Map()
 const saveOrchTabs = () => { try { atomicWrite(ORCH_TABS_FILE, JSON.stringify([...orchTabs.values()]), PRIVATE) } catch {} }
@@ -963,7 +1001,7 @@ const lastLine = (s) => String(s).trim().split(/[\r\n]+/).pop()
 
 function runGit(cwd, args, timeout = 15000) {
   return new Promise((res) => {
-    execFile('git', ['-C', cwd, ...args], { timeout }, (err, stdout, stderr) => {
+    execFile('git', ['-C', cwd, ...args], { timeout, maxBuffer: 32 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
       res({ ok: !err, out: stdout || '', err: (stderr || (err ? String(err.message) : '')).trim() })
     })
   })
@@ -1056,7 +1094,7 @@ function prView(repo, number) {
 // ── Tick snapshot (BRIEF *Each tick* steps 1–2) ─────────────────────────────
 // The loop's GitHub query and Jira calls, built from the live project index so
 // they never drift. GitHub runs here; the Jira calls are returned for the
-// orchestrator to make through Atlassian Rovo (this server has no Jira access).
+// orchestrator to make through its Atlassian MCP server (this server has no Jira access).
 const GH_LOGIN_F = CONFIG_FIELDS.identity.find((f) => f.key === 'ghLogin')
 const TICK_F = Object.fromEntries(['cloudId', 'qaAssigneeField', 'qaColumns', 'reviewScope'].map((k) => [k, CONFIG_FIELDS.defaults.find((f) => f.key === k)]))
 const REPO_WIDE_F = F('repoWide', 'Repo-wide') // legacy label the index still honours
@@ -1107,7 +1145,7 @@ function ghGraphql(query, vars = {}, timeout = 30000) {
   })
 }
 
-// ── GitHub for the orchestrator, which has no shell (github_read / github_write) ──
+// ── GitHub status and the loop's own writes, typed (github_read / github_write) ──
 // Every call is gh with an argv built here — never a shell — so no caller value may start
 // with - (it would read as an option), and output past GH_CAP characters is cut.
 const GH_CAP = 20000
@@ -1198,7 +1236,7 @@ async function githubWrite(a) {
     let pr; try { pr = JSON.parse(v.out) } catch { return { error: v.err || 'could not read the PR' } }
     if ((pr.author?.login || '').toLowerCase() !== me.toLowerCase()) return { error: `refused: #${num} is ${pr.author?.login || 'someone else'}'s PR, not yours` }
     if (pr.isDraft) return { error: `refused: #${num} is a draft` }
-    if (pr.title.startsWith(`[${a.key}]`) || pr.title.startsWith(a.key)) return { ok: true, title: pr.title, unchanged: true }
+    if (new RegExp(`^\\[?${a.key}\\b`).test(pr.title)) return { ok: true, title: pr.title, unchanged: true }
     const title = `[${a.key}] ${pr.title}`
     const e = await gh(['pr', 'edit', num, '--repo', a.repo, `--title=${title}`])
     return e.ok ? { ok: true, title } : { error: e.err || 'gh pr edit failed' }
@@ -1426,6 +1464,9 @@ async function createWorktree(repo, branch) {
   const name = branch.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/\.\.+/g, '-').replace(/^[.\-]+|[.\-]+$/g, '') || 'wt'
   const wt = join(worktreeBase(repo), name)
   const localEx = (await runGit(repo.path, ['rev-parse', '--verify', '--quiet', 'refs/heads/' + branch])).ok
+  // A teammate's branch pushed since the last fetch has no origin ref yet: fetch it first, or
+  // it reads as brand-new and is cut from base. Fails harmlessly for a branch origin lacks.
+  if (!localEx) await runGit(repo.path, ['fetch', '--', 'origin', branch], 60000)
   const remoteEx = !localEx && (await runGit(repo.path, ['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/' + branch])).ok
   const created = !localEx && !remoteEx
   // A brand-new branch is cut from the freshly-fetched project base (never stale HEAD).
@@ -1437,11 +1478,24 @@ async function createWorktree(repo, branch) {
       : baseRef
         ? ['worktree', 'add', '-b', branch, wt, baseRef]
         : ['worktree', 'add', '-b', branch, wt]
+  // Clear the path first. A folder git doesn't list as a worktree (a crashed checkout, a copy)
+  // is renamed to <name>.stale-<UTC stamp>, never deleted. A worktree git lists there whose
+  // folder is gone is pruned from the registry. (Pruned before the add, not after it fails:
+  // a failed `add -b` has already made the branch.)
+  let movedAside = null
+  const here = realOr(dirname(wt)) + sep + basename(wt) // git lists real paths; wt may not exist
+  const listed = (await listWorktrees(repo)).some((w) => samePath(w.path, here))
+  if (existsSync(wt) && !listed) {
+    movedAside = `${wt}.stale-${new Date().toISOString().replace(/\D/g, '').slice(0, 14)}`
+    try { renameSync(wt, movedAside) } catch (e) { return { error: `${wt} is in the way and could not be moved aside: ${e.message}` } }
+  } else if (listed && !existsSync(wt)) await runGit(repo.path, ['worktree', 'prune'])
   // Checking out a big repo (thousands of files, a slow Windows disk) takes well over the 15 s
   // default, and a killed checkout reads as a failure though it was nearly done.
   const r = await runGit(repo.path, args, 5 * 60 * 1000)
-  if (!r.ok) return { error: lastLine(r.err || 'worktree add failed') }
+  if (!r.ok) return { error: lastLine(r.err || 'worktree add failed'), ...(movedAside ? { movedAside } : {}) }
   await excludeReportFile(repo)
+  // A local branch left from an earlier run may be behind origin (a force-push, new commits).
+  const sync = localEx ? await syncWorktree(wt, branch) : null
   // Seed gitignored files (e.g. .env) from the main checkout — they never travel
   // with the branch. Never clobber a file the worktree already has. Each entry must
   // resolve INSIDE both trees — reject `..`/absolute escapes so a crafted seedFiles
@@ -1453,13 +1507,22 @@ async function createWorktree(repo, branch) {
     if (!inside(repo.path, src) || !inside(wt, dst)) continue // escapes the tree — skip
     try { if (existsSync(src) && !existsSync(dst)) { copyFileSync(src, dst); seeded.push(f) } } catch {}
   }
-  return { path: wt, branch, created, base: baseRef, seeded }
+  return { path: wt, branch, created, base: baseRef, seeded, sync, movedAside }
+}
+
+// The worktree that has branch checked out. One git lists but whose folder is gone is pruned
+// from git's registry, so the branch checks out afresh.
+async function branchWorktree(repo, branch) {
+  const w = (await listWorktrees(repo)).find((x) => x.branch === branch)
+  if (!w || existsSync(w.path)) return w || null
+  await runGit(repo.path, ['worktree', 'prune'])
+  return null
 }
 
 // Resolve a worktree for a branch: reuse the one that already has it checked out,
 // otherwise create it (handles local / origin / brand-new).
 async function openBranchWorktree(repo, branch) {
-  const existing = (await listWorktrees(repo)).find((w) => w.branch === branch)
+  const existing = await branchWorktree(repo, branch)
   if (existing) return { path: existing.path, branch, reused: true }
   return createWorktree(repo, branch)
 }
@@ -1544,19 +1607,10 @@ function readBody(req) {
       if (size > MAX_BODY) { over = true; b = ''; reject(Object.assign(new Error('request body over 1 MB'), { status: 413 })) } else b += c
     })
     req.on('end', () => { if (over) return; try { const v = JSON.parse(b || '{}'); r(isObj(v) ? v : {}) } catch { r({}) } })
+    // A client that goes away mid-body rejects it (a settled promise ignores the rest).
+    const gone = () => reject(Object.assign(new Error('request aborted'), { status: 400 }))
+    req.on('error', gone); req.on('aborted', gone); req.on('close', () => { if (!req.complete) gone() })
   })
-}
-
-// Only this machine's own pages and processes: the Host must name the loopback address
-// (so a DNS-rebound name is refused), and a browser's Origin must be the cockpit itself
-// or its dev UI (vite on DEV_PORT, which proxies here and keeps the Host). Non-browser
-// clients (hooks, MCP, the status line) send no Origin.
-const DEV_PORT = 4178
-const LOCAL_HOSTS = ['127.0.0.1', 'localhost', '[::1]'].flatMap((h) => [h, `${h}:${PORT}`, `${h}:${DEV_PORT}`])
-function localRequest(req) {
-  if (!LOCAL_HOSTS.includes(String(req.headers.host || '').toLowerCase())) return false
-  const o = req.headers.origin
-  return o === undefined || LOCAL_HOSTS.some((h) => o.toLowerCase() === 'http://' + h)
 }
 
 // Memory of the cockpit and everything it spawned (the PTYs and their children —
@@ -1813,7 +1867,6 @@ const server = http.createServer(async (req, res) => {
 async function handleRequest(req, res) {
   const url = new URL(req.url, 'http://localhost')
   const path = url.pathname
-  if (!localRequest(req)) return sendJson(res, { error: 'forbidden: not a local request' }, 403)
 
   // ── MCP control plane (its token, from --mcp-config's Authorization header, says who calls) ──
   if (path === '/mcp') {
@@ -1953,6 +2006,7 @@ async function handleRequest(req, res) {
     if (!cwd || !allowedCwd(cwd)) return sendJson(res, { error: 'cwd not allowed' }, 400)
     if (!name) return sendJson(res, { error: 'name required' }, 400)
     const safe = basename(String(name)).replace(/[^A-Za-z0-9._ -]/g, '_') || 'file'
+    if (safe.toLowerCase() === '.gitignore') return sendJson(res, { error: '.gitignore is the folder\'s own — rename the file' }, 400)
     const dir = join(cwd, '.jeeves-uploads')
     const chunks = []; let size = 0, aborted = false
     // Past the cap, stop buffering but let the body drain, so 'end' still sends the 413.
@@ -1961,8 +2015,13 @@ async function handleRequest(req, res) {
       if (aborted) return sendJson(res, { error: 'file too large' }, 413)
       try {
         ignoredDir(dir)
-        await writeFile(join(dir, safe), Buffer.concat(chunks))
-        sendJson(res, { ok: true, path: join('.jeeves-uploads', safe) })
+        // A taken name gets a -1, -2 … suffix before its extension; nothing is overwritten.
+        const ext = extname(safe) === safe ? '' : extname(safe), stem = safe.slice(0, safe.length - ext.length), body = Buffer.concat(chunks)
+        for (let i = 0; ; i++) {
+          const n = i ? `${stem}-${i}${ext}` : safe
+          try { await writeFile(join(dir, n), body, { flag: 'wx' }); return sendJson(res, { ok: true, path: join('.jeeves-uploads', n) }) }
+          catch (e) { if (e.code !== 'EEXIST') throw e }
+        }
       } catch (e) { sendJson(res, { error: e.message }, 500) }
     })
     req.on('error', () => { if (!res.headersSent) sendJson(res, { error: 'upload failed' }, 500) })
@@ -2208,8 +2267,10 @@ function sessionSettings(id, deny = []) {
     // The orchestrator's context is about to be summarised: its next tick_snapshot is whole.
     ...(id === 'orch:main' ? { PreCompact: [post('compact')] } : {}),
     // The orchestrator dispatches work and never does it (bin/guard-orchestrator.mjs): every
-    // tool call, MCP included, goes past the guard, which refuses whatever it doesn't allow.
-    ...(id === 'orch:main' ? { PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: `"${process.execPath}" "${GUARD_SCRIPT}" "${NEUTRAL}" "${join(__dirname, '..')}"` }] }] } : {})
+    // tool call, MCP included, goes past the guard, which refuses what the design keeps off it.
+    // Claude Code blocks only on exit 2 and runs the command through sh (Git Bash on Windows),
+    // so `|| exit 2` turns any other failure — a missing script, a node crash — into a block.
+    ...(id === 'orch:main' ? { PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: `"${process.execPath}" "${GUARD_SCRIPT}" "${NEUTRAL}" || exit 2` }] }] } : {})
   } })
 }
 
@@ -2236,11 +2297,9 @@ const AGENT_LIMITS = {
 const agentLimits = (name) => AGENT_LIMITS[name] || { env: {}, deny: [] }
 
 // Hook lifecycle states compose with the semantic ones from `report`. A report's
-// outcome (done/blocked/error) is authoritative and STICKS: a lifecycle hook must
-// never overwrite it — not even 'working' from the SessionStart/UserPromptSubmit
-// that fires when a finished worker is resumed after a server restart (that was
-// silently flipping a reported 'done' back to 'working'). Only a fresh report
-// moves a worker off a semantic terminal.
+// outcome (done/blocked/error) is authoritative and STICKS: no lifecycle hook moves it,
+// not even the 'working' from SessionStart/UserPromptSubmit when a finished worker is
+// resumed after a server restart. Only a fresh report moves a worker off it.
 function applyHookStatus(cur, next) {
   if (cur === 'done' || cur === 'blocked' || cur === 'error') return cur // semantic terminal — hooks can't touch it
   if (next === 'offline') return 'exited'
@@ -2269,13 +2328,15 @@ function workerPreamble(workId) {
 
 // The orchestrator is a real `claude` booting the Jeeves loop, wired to this
 // process's MCP server and given a known session id so we can read its context.
-// Its built-in tools: reads, its own bookkeeping, the loop, and messaging — no shell,
-// no native subagents (the cockpit MCP tools cover status reads; work goes to dispatch).
+// Its built-in tools: reads, a shell for status and housekeeping, its own bookkeeping, the
+// loop and messaging. No Agent/Task: every agent runs through dispatch, which gives it a
+// worktree, report() and a dashboard row.
 // `--tools=` in one argument, since the flag is variadic and would swallow the prompt.
-const ORCH_TOOLS = ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Skill', 'ToolSearch', 'ScheduleWakeup', 'SendMessage', 'ListAgents', 'PushNotification']
+const ORCH_TOOLS = ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash', 'Skill', 'ToolSearch', 'ScheduleWakeup', 'SendMessage', 'ListAgents', 'PushNotification']
 function fileArgsFor(kind, sid, cwd, prompt) {
   // Order matters: --mcp-config is variadic, so it must be followed by another
-  // flag (not the positional prompt) or it swallows the prompt as a config path.
+  // flag (not the positional prompt) or it swallows the prompt as a config path. A prompt
+  // follows `--`, so one starting with - (a markdown bullet) is never read as a flag.
   if (kind === 'orch') {
     // Reusing a session id errors ("already in use"), so on any respawn (crash,
     // reaper, reopened pane) resume once the transcript exists. Every launch takes
@@ -2305,9 +2366,9 @@ function fileArgsFor(kind, sid, cwd, prompt) {
     let rec = tabSessions.get(sid)
     if (!rec) { rec = { sessionId: randomUUID(), cwd: cwd || NEUTRAL }; tabSessions.set(sid, rec); saveTabs() }
     const idArgs = existsSync(transcriptPathFor(rec.cwd, rec.sessionId)) ? ['--resume', rec.sessionId] : ['--session-id', rec.sessionId]
-    return { file: 'claude', args: ['--mcp-config', mcpConfig('tab', sid), ...idArgs, '--settings', sessionSettings(sid), ...(prompt ? [prompt] : [])] }
+    return { file: 'claude', args: ['--mcp-config', mcpConfig('tab', sid), ...idArgs, '--settings', sessionSettings(sid), ...(prompt ? ['--', prompt] : [])] }
   }
-  if (kind === 'codex') return { file: 'codex', args: prompt ? [prompt] : [] }
+  if (kind === 'codex') return { file: 'codex', args: prompt ? ['--', prompt] : [] }
   return { file: SHELL, args: [] }
 }
 
@@ -2320,7 +2381,7 @@ function fileArgsFor(kind, sid, cwd, prompt) {
 const PTY_ENV = (() => {
   const e = {
     ...process.env, TERM_PROGRAM: 'jeeves-cockpit', SHELL_SESSIONS_DISABLE: '1',
-    JEEVES_USAGE_URL: `http://${HOST}:${PORT}/api/usage?token=${USAGE_TOKEN}`, JEEVES_HOOK_URL: `http://${HOST}:${PORT}/api/hook?token=${HOOK_TOKEN}`
+    JEEVES_USAGE_URL: `${SELF_URL}/api/usage?token=${USAGE_TOKEN}`, JEEVES_HOOK_URL: `${SELF_URL}/api/hook?token=${HOOK_TOKEN}`
   }
   delete e.TERM_SESSION_ID
   delete e.JEEVES_TOKEN // a pinned browser token never reaches a shell
@@ -2329,9 +2390,11 @@ const PTY_ENV = (() => {
 
 // node-pty on Windows looks a bare name up on PATH without PATHEXT, so `claude`
 // finds npm's extensionless sh shim and CreateProcess fails (error code 2). Resolve
-// a bare name with where.exe instead: the .exe if there is one, else the exe an npm
-// .cmd shim points at, else the shim through cmd.exe. cmd ends a command at a newline, so
-// a multi-line argument through it is refused. Cached per name; a miss only for a minute.
+// a bare name with where.exe instead: the .exe if there is one, else the exe a .cmd shim
+// runs with just its arguments (`"%dp0%\x.exe" %*` or `"%~dp0x.exe" %*` — not, say, VS Code's
+// code.cmd, which runs Code.exe on a script), else the shim through cmd.exe. Arguments are
+// quoted for the C runtime, which cmd.exe ignores, so through it an argument carrying a
+// newline or any of & | < > ^ % ! " is refused. Cached per name; a miss only for a minute.
 const _winBin = new Map()
 function winSpawnTarget(file, args) {
   if (!WIN || /[\\/.]/.test(file)) return [file, args]
@@ -2341,17 +2404,18 @@ function winSpawnTarget(file, args) {
     let hit = hits.find((h) => /\.exe$/i.test(h)) || null
     const shim = hit ? null : hits.find((h) => /\.(cmd|bat)$/i.test(h))
     if (shim) {
-      const m = readFileSync(shim, 'utf8').match(/"%dp0%\\([^"]+\.exe)"/i)
+      const m = readFileSync(shim, 'utf8').match(/^\s*"%(?:dp0%\\|~dp0)([^"]+\.exe)"\s+%\*\s*$/im)
       const exe = m && join(dirname(shim), m[1])
       hit = exe && existsSync(exe) ? exe : shim
-      if (hit === shim) console.error(`cockpit: running ${file} through cmd.exe (${shim}); multi-line arguments are refused`)
+      if (hit === shim) console.error(`cockpit: running ${file} through cmd.exe (${shim}); arguments with a newline or & | < > ^ % ! " are refused`)
     }
     _winBin.set(file, { hit, at: Date.now() })
   }
   const { hit } = _winBin.get(file)
   if (!hit) return [file, args]
   if (/\.exe$/i.test(hit)) return [hit, args]
-  if (args.some((a) => /[\r\n]/.test(a))) throw new Error(`${file} resolves only to ${hit}, run through cmd.exe, which cannot pass a multi-line argument — install ${file} as an .exe (e.g. Claude Code's native installer)`)
+  const odd = args.find((a) => /[\r\n&|<>^%!"]/.test(a))
+  if (odd != null) throw new Error(`${file} resolves only to ${hit}, run through cmd.exe, which cannot pass an argument with a newline or & | < > ^ % ! " (${JSON.stringify(odd.slice(0, 60))}) — install ${file} as an .exe (e.g. Claude Code's native installer), or rename the folder`)
   return [process.env.ComSpec || 'cmd.exe', ['/d', '/c', hit, ...args]]
 }
 
@@ -2374,11 +2438,13 @@ function spawnSession(sid, cwd, file, args, kind, env = {}) {
     broadcast({ t: 'exit', code: exitCode })
     // Only drop the registry entry if it is still this PTY: after a kill, a reattach
     // can spawn a replacement under the same sid before this exit fires.
-    const own = sessions.get(sid) === sess // false once closeWork/kill dropped it first
-    if (own) {
-      sessions.delete(sid)
-      // Its MCP sessions end with it; a respawn mints a fresh token.
+    const own = sessions.get(sid) === sess // false once closeWork, a kill frame or the reaper dropped it first
+    if (own) sessions.delete(sid)
+    // Unless a replacement holds the sid (it minted its own token), the session's MCP token
+    // and --mcp-config go with it; a respawn mints fresh ones.
+    if (!sessions.has(sid)) {
       for (const [t, v] of mcpTokens) if (v.caller === sid) revokeMcpToken(t)
+      try { unlinkSync(sessionFile(sid, '.mcp.json')) } catch {}
     }
     const w = [...bus.workers.values()].find((x) => x.sid === sid)
     if (w && !['done', 'blocked', 'error'].includes(w.status)) { w.status = exitCode ? 'error' : 'exited'; w.updatedAt = Date.now(); saveWorkers(); pushSpaces() }
@@ -2400,8 +2466,10 @@ function attach(ws, sid, cwd, kind, cid) {
     if (launch) launch.sid = sid
     const pend = pendingLaunches.get(tabId), pl = pend?.kind === kind ? pend : null
     if (pl) pendingLaunches.delete(tabId)
-    const { file, args, env } = fileArgsFor(kind, sid, cwd, launch?.prompt ?? pl?.prompt)
-    try { sess = spawnSession(sid, cwd, file, args, kind, env) }
+    // A worker runs in its own worktree, whatever folder the pane asked for.
+    const at = (kind === 'worker' && workerList().find((w) => w.sid === sid)?.cwd) || cwd
+    const { file, args, env } = fileArgsFor(kind, sid, at, launch?.prompt ?? pl?.prompt)
+    try { sess = spawnSession(sid, at, file, args, kind, env) }
     catch (err) {
       try { ws.send(JSON.stringify({ t: 'o', d: `\r\n[cockpit: failed to spawn ${file} — ${err.message}]\r\n` })) } catch {}
       try { ws.send(JSON.stringify({ t: 'fatal', reason: `failed to spawn ${file}` })) } catch {}
@@ -2471,7 +2539,7 @@ async function dispatch({ agent, repo, ticket, branch, prompt, model }) {
   // A branch that already has a worktree (never the main checkout) reuses it when nothing
   // else is in it: not a live worker's, and no uncommitted changes. Otherwise say why,
   // never clobber it. A reused worktree is fetched and fast-forwarded when strictly behind.
-  const existing = (await listWorktrees(r)).find((w) => w.branch === br && !w.isMain)
+  const found = await branchWorktree(r, br), existing = found && !found.isMain ? found : null
   let sync = null
   if (existing) {
     const owner = workerList().find((w) => samePath(w.cwd, existing.path) && isLive(w))
@@ -2482,7 +2550,7 @@ async function dispatch({ agent, repo, ticket, branch, prompt, model }) {
     sync = await syncWorktree(existing.path, br)
   }
   const wt = existing ? { path: existing.path } : await createWorktree(r, br)
-  if (wt.error) return { error: wt.error + (/already exists/.test(wt.error) ? ' — a leftover folder, not a registered worktree: ask the user to remove it, never delete it yourself' : '') }
+  if (wt.error) return { error: wt.error, ...(wt.movedAside ? { movedAside: wt.movedAside } : {}) }
   dynRoots.add(normalize(wt.path))
   const workId = 'w' + randomBytes(3).toString('hex')
   const sid = 'work:' + workId
@@ -2492,7 +2560,7 @@ async function dispatch({ agent, repo, ticket, branch, prompt, model }) {
   // A reviewer runs the project's review command, whatever the loop's prompt says.
   if (def?.name === 'reviewer') prompt = `${String(prompt || '').trim()}\n\nReview command for this project: ${r.reviewCommand || DEFAULT_REVIEW_COMMAND}`.trim()
   const lim = agentLimits(agent)
-  const args = ['--session-id', sessionId, '--mcp-config', mcpConfig('worker', sid), '--model', wmodel, '--permission-mode', cfg('workerPermission'), '--settings', sessionSettings(workId, lim.deny), ...(def ? agentArgs(def) : []), '--append-system-prompt', workerPreamble(workId), String(prompt || 'Begin your assigned task.')]
+  const args = ['--session-id', sessionId, '--mcp-config', mcpConfig('worker', sid), '--model', wmodel, '--permission-mode', cfg('workerPermission'), '--settings', sessionSettings(workId, lim.deny), ...(def ? agentArgs(def) : []), '--append-system-prompt', workerPreamble(workId), '--', String(prompt || 'Begin your assigned task.')]
   try { spawnSession(sid, wt.path, 'claude', args, 'worker', lim.env) }
   catch (err) {
     // Don't leave a worktree this dispatch created orphaned (no bus entry → uncloseable); a reused one stays.
@@ -2513,7 +2581,7 @@ async function dispatch({ agent, repo, ticket, branch, prompt, model }) {
   bus.workers.set(workId, rec)
   saveWorkers()
   pushSpaces()
-  return { workId, sid, cwd: wt.path, branch: br, ...(existing ? { reused: true, ...sync } : {}) }
+  return { workId, sid, cwd: wt.path, branch: br, ...(existing ? { reused: true, ...sync } : wt.sync), ...(wt.movedAside ? { movedAside: wt.movedAside } : {}) }
 }
 
 // { path } of the main checkout a worktree belongs to, from git; null when git can't say.
@@ -2553,7 +2621,7 @@ async function closeWork(workId, { removeWorktree: rm, force } = {}) {
   if (rm) {
     // A project deleted since the dispatch: the worktree still knows its own repo.
     const repo = REPOS.find((r) => r.id === w.repo) || await repoOfWorktree(w.cwd)
-    const r = repo ? await removeWorktree(repo, w.cwd, !!force) : { error: `${w.cwd} is not a git worktree any more — remove it by hand` }
+    const r = repo ? await removeWorktree(repo, w.cwd, !!force) : { error: `${w.cwd} is not a git worktree any more — delete the folder once nothing in it is needed` }
     if (r.error) { w.status = 'exited'; saveWorkers(); pushSpaces(); return { error: r.error } } // e.g. dirty — keep the entry so the user can force
   }
   forgetSession(w.sid, w.workId)
@@ -2765,7 +2833,7 @@ function buildMcpServer(role, caller) {
     ...custom.map((a) => `- ${a.name} (custom) — ${a.description}`)
   ].join('\n')
   if (full) srv.registerTool('dispatch', {
-    description: 'Dispatch a unit of work to a separate worker session (a new cockpit space) in a fresh worktree. Returns a workId. A branch whose worktree already exists, clean and with no live worker, is reused: the result then carries reused: true and ahead / behind against origin (fetched, and fast-forwarded when only behind — fastForwarded: n); tell the worker it continues existing work, and say so when ahead and behind are both non-zero. The worker reports back via the "report" tool; drain results with "inbox". Use this — never the Agent/Task tool — for every agent run while the cockpit is up, ad-hoc asks included.\n'
+    description: 'Dispatch a unit of work to a separate worker session (a new cockpit space) in a fresh worktree. Returns a workId. A branch whose worktree already exists, clean and with no live worker, is reused: the result then carries reused: true and ahead / behind against origin (fetched, and fast-forwarded when only behind — fastForwarded: n); tell the worker it continues existing work, and say so when ahead and behind are both non-zero. A folder in the way that git does not list as a worktree is renamed to <name>.stale-<stamp>, never deleted (movedAside: its new path — mention it in the tick report); a registered worktree whose folder is gone is pruned. The worker reports back via the "report" tool; drain results with "inbox". Use this — never the Agent/Task tool — for every agent run while the cockpit is up, ad-hoc asks included.\n'
       + 'When `agent` names one of these agents, the session runs as it (its prompt, tools and model) — the prompt carries only the task:\n'
       + roster + '\n'
       + 'Any other `agent` is a label: compose the full prompt yourself (role + task).',
@@ -2774,7 +2842,7 @@ function buildMcpServer(role, caller) {
       repo: z.string().describe('Repo id or slug the work belongs to.'),
       prompt: z.string().describe('The task, with its full context; for a label, also the role.'),
       ticket: z.string().optional().describe('Jira key, PR number, or story id, for tracking.'),
-      branch: z.string().optional().describe('Branch/worktree name; defaults from ticket. For a reviewer, pass the PR head branch.'),
+      branch: z.string().optional().describe('Branch/worktree name; defaults from ticket. For a reviewer of a teammate\'s PR, pass the PR head branch; for the user\'s own PR, omit it (a story-worker may hold that branch).'),
       model: z.string().optional().describe(`Worker model; defaults to ${cfg('workerModel')} (any opus you pass is pinned to ${workerOpus()}). Use sonnet only for mechanical work. A custom or customised agent with its own model runs on that instead.`)
     }
   }, async (a) => {
@@ -2815,7 +2883,7 @@ function buildMcpServer(role, caller) {
   })
 
   if (full) srv.registerTool('close_work', {
-    description: 'Close a finished worker: end its session and optionally remove its worktree. Close a planner workspace once you have captured/published its plan (removeWorktree: true — planners are scratch). Close a story-worker workspace once its PR has merged (removeWorktree: true — removing the worktree leaves the merged branch/PR intact). Close a reviewer workspace once it has posted its review or the user dropped it (removeWorktree: true).',
+    description: 'Close a finished worker: end its session and optionally remove its worktree. Close a planner workspace once its plan is approved or dropped (removeWorktree: true — planners are scratch). Close a story-worker workspace once its PR has merged (removeWorktree: true — removing the worktree leaves the merged branch/PR intact). Close a reviewer workspace once it has posted its review or the user dropped it (removeWorktree: true).',
     inputSchema: {
       workId: z.string(),
       removeWorktree: z.boolean().optional().describe('Delete the git worktree too.'),
@@ -2873,27 +2941,34 @@ function buildMcpServer(role, caller) {
   }, async (a) => {
     const id = String(a.id || '').trim()
     if (!/^[A-Za-z0-9._-]+$/.test(id) || id.startsWith('.')) return bad('invalid project id: ' + a.id)
-    const dir = join(NEUTRAL, 'projects', id)
-    if (existsSync(join(dir, 'project.md'))) return bad('project already exists: ' + id)
-    if (a.baseBranch && String(a.baseBranch).trim().startsWith('-')) return bad('baseBranch must not start with -')
-    const prose = [
-      `# Project: ${id}`, '',
-      '## Identity',
-      `- **repo:** \`${a.repo}\``,
-      a.baseBranch ? `- **base branch:** \`${a.baseBranch}\`` : null,
-      a.path ? `- **path:** \`${a.path}\`` : null,
-      a.jiraKey ? `\n## Jira\n- **project key:** \`${a.jiraKey}\`` : null,
-      ''
-    ].filter((l) => l != null).join('\n')
-    const fm = {}
-    if (a.reviewCommand) fm.reviewCommand = String(a.reviewCommand).trim()
-    if (a.seedFiles?.length) fm.seedFiles = a.seedFiles.map(String).map((s) => s.trim()).filter(Boolean).join(', ')
-    try { mkdirSync(dir, { recursive: true }); atomicWrite(join(dir, 'project.md'), writeFrontmatter(prose, fm)) }
-    catch (e) { return bad('write failed: ' + e.message) }
-    const rec = repoFromDir(id)
-    if (!rec) return bad('created project.md but it is not usable — check repo/path')
-    REPOS.push(rec); addRepoRoots(rec); pushConfig()
-    return ok(`created project ${id} (${rec.slug} → ${rec.path})`)
+    // Each value as update_config stores it: no backtick, newline or placeholder can break the file.
+    const v = {}, pf = (k) => CONFIG_FIELDS.project.find((f) => f.key === k)
+    for (const [f, x] of [[REPO_F, a.repo], [PATH_F, a.path], [pf('baseBranch'), a.baseBranch], [pf('jiraKey'), a.jiraKey], [pf('reviewCommand'), a.reviewCommand], [pf('seedFiles'), a.seedFiles]]) {
+      const n = normValue(f, x); if (n?.error) return bad(n.error); v[f.key] = n
+    }
+    if (!GH_REPO.test(v.repo || '')) return bad('repo must be a GitHub slug, owner/name')
+    const file = projectFile(id), dir = dirname(file)
+    return withLock(file, () => {
+      if (existsSync(file)) return bad('project already exists: ' + id)
+      const prose = [
+        `# Project: ${id}`, '',
+        '## Identity',
+        `- **repo:** \`${v.repo}\``,
+        v.baseBranch ? `- **base branch:** \`${v.baseBranch}\`` : null,
+        v.path ? `- **path:** \`${v.path}\`` : null,
+        v.jiraKey ? `\n## Jira\n- **project key:** \`${v.jiraKey}\`` : null,
+        ''
+      ].filter((l) => l != null).join('\n')
+      const fm = {}
+      if (v.reviewCommand) fm.reviewCommand = v.reviewCommand
+      if (v.seedFiles) fm.seedFiles = v.seedFiles.join(', ')
+      try { mkdirSync(dir, { recursive: true }); atomicWrite(file, writeFrontmatter(prose, fm)) }
+      catch (e) { return bad('write failed: ' + e.message) }
+      const rec = repoFromDir(id)
+      if (!rec) return bad('created project.md but it is not usable — check repo/path')
+      REPOS.push(rec); addRepoRoots(rec); pushConfig()
+      return ok(`created project ${id} (${rec.slug} → ${rec.path})`)
+    })
   })
 
   if (full) srv.registerTool('update_project', {
@@ -2974,7 +3049,7 @@ function buildMcpServer(role, caller) {
     const kind = a.command ? 'shell' : a.tab || 'claude', tab = { id: randomBytes(3).toString('hex'), kind }
     if (a.command) { pendingLaunches.set(tab.id, { kind, command: a.command, at: Date.now() }); logUserRun('open_space', a.command) }
     if (a.prompt != null) pendingLaunches.set(tab.id, { kind, prompt: a.prompt, at: Date.now() })
-    addOrchTab({ tabRef: tab.id, space: spaceRef, kind, ...(a.command ? { command: a.command } : {}) })
+    addOrchTab({ tabRef: tab.id, space: spaceRef, kind, ...(a.prompt != null ? { prompt: a.prompt } : {}), ...(a.command ? { command: a.command } : {}) })
     broadcast({ t: 'open_space', cmd: { id: spaceRef, repoId: r?.id ?? '', cwd, label, kind, tab } })
     return { content: [{ type: 'text', text: `opening space “${label}” → ${cwd} (spaceRef: ${spaceRef}, tabRef: ${tab.id})` }], structuredContent: { spaceRef, tabRef: tab.id, cwd, label } }
   })
@@ -3109,7 +3184,7 @@ function buildMcpServer(role, caller) {
     description: 'Run the tick\'s GitHub query (BRIEF *Each tick* step 1) server-side from the project index and return its PRs per project, plus the exact Jira call(s) for step 2. Compact JSON:\n'
       + '- `projects: { <project id>: { myPrs, reviews } }` on the first call of this session or with full: true. A PR is { number, title, url, head, base, headRefOid, isDraft?, reviewDecision?, checks? (pass/fail/pending), missingKey? (own non-draft PR without its project\'s Jira key) }; a review candidate adds author, requested? (the user is asked to review), reviewers? (requested logins/teams), myReview? { state, oid } (the user\'s latest review). Absent = false/none; a project with no PRs is absent. Only configured repos (every repo, keyed owner/name, when none are configured).\n'
       + '- `delta: { <project id>: { myPrs?, reviews?: { added?: [PR], changed?: [{ number, <field>: <new value, null = gone> }], removed?: [number] }, unchanged } }` on later calls — only what changed since this session\'s last complete call.\n'
-      + '- `jira: [{ args, qaColumns? }]`: pass each `args` as-is to Atlassian Rovo searchJiraIssuesUsingJql (page with nextPageToken); qaColumns are that call\'s QA columns, for colouring QA rows.\n'
+      + '- `jira: [{ args, qaColumns? }]`: pass each `args` as-is to ' + `mcp__${cfg('atlassianServer')}__searchJiraIssuesUsingJql` + ' (page with nextPageToken); qaColumns are that call\'s QA columns, for colouring QA rows.\n'
       + '- `incomplete: { <alias>: reason }` with whole `projects`: a later page failed, so those searches are cut short — do not resolve rows missing from them. The next call deltas against the last complete one.\n'
       + '- `{ error, jira }`: gh is missing, unauthenticated or the query failed — run the Jira call(s) anyway and report GitHub as unavailable.\n'
       + '- With full: true, also `index: [{ id, repo, path, jiraKey, baseBranch, repoWide, jiraOverride }]` (the projects; repoWide = reviews every teammate PR, jiraOverride = sets its own Jira site or QA fields), `ledgers: { <project id>: { ledger: true, rows: [{ kind, id, state, next, since, extra }] } | { ledger: false, raw } }` (each state.md parsed), and `agents: [{ name, description }]` (what dispatch can run).\n'
@@ -3151,11 +3226,11 @@ function buildMcpServer(role, caller) {
     return { content: [{ type: 'text', text: JSON.stringify({ reports, tabs }) }], structuredContent: { reports, tabs } }
   })
 
-  // ── Status reads and the loop's bookkeeping, typed — the orchestrator has no shell ──
+  // ── Status reads and the loop's bookkeeping, typed ──
   const ro = { readOnlyHint: true }
   const result = (out) => (out.error ? bad(out.error) : ok(out.text ?? JSON.stringify(out)))
   if (full) srv.registerTool('github_read', {
-    description: 'Read GitHub status through gh — never a shell. Output past 20000 characters comes back as { text: <the first 20000>, total, truncated: true }. No value may start with -.\n'
+    description: 'Read GitHub status through gh, shaped for the loop. Output past 20000 characters comes back as { text: <the first 20000>, total, truncated: true }. No value may start with -.\n'
       + '- pr: one PR (number) — number, title, state, isDraft, author, headRefName, baseRefName, headRefOid, mergedAt, closedAt, mergeable, mergeStateStatus, statusCheckRollup, reviews, latestReviews, reviewRequests, body, url.\n'
       + '- checks: a PR\'s checks (number) — name, state, bucket (pass/fail/pending/skipping/cancel), workflow, link, startedAt, completedAt.\n'
       + '- prs: a repo\'s PRs, filtered by head (branch), state (open/closed/merged/all), query (a search string) and limit.\n'
@@ -3275,8 +3350,7 @@ async function handleMcp(req, res, who) {
   if (req.method === 'POST') {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
-      onsessioninitialized: (id) => mcpTransports.set(id, { transport, token: who.token, at: Date.now() }),
-      enableDnsRebindingProtection: true, allowedHosts: LOCAL_HOSTS, allowedOrigins: LOCAL_HOSTS.map((h) => 'http://' + h)
+      onsessioninitialized: (id) => mcpTransports.set(id, { transport, token: who.token, at: Date.now() })
     })
     transport.onclose = () => { if (transport.sessionId) mcpTransports.delete(transport.sessionId) }
     try { await buildMcpServer(who.role, who.caller).connect(transport) } catch (err) { res.writeHead(500); return res.end(String(err?.message || err)) }
@@ -3306,7 +3380,6 @@ const ptyWss = new WebSocketServer({ noServer: true })
 const eventsWss = new WebSocketServer({ noServer: true })
 server.on('upgrade', (req, socket, head) => {
   const { pathname } = new URL(req.url, 'http://localhost')
-  if (!localRequest(req)) { socket.end('HTTP/1.1 403 Forbidden\r\nconnection: close\r\n\r\n'); return }
   if (pathname === '/pty') ptyWss.handleUpgrade(req, socket, head, (ws) => ptyWss.emit('connection', ws, req))
   else if (pathname === '/events') eventsWss.handleUpgrade(req, socket, head, (ws) => eventsWss.emit('connection', ws, req))
   else socket.destroy()
@@ -3363,9 +3436,10 @@ eventsWss.on('connection', (ws, req) => {
   if (!authed(req, url)) return ws.close()
   ws.token = TOKEN
   eventClients.add(ws)
-  // Prime the new client with the current picture, the layout too, so a reconnect resyncs.
+  // Prime the new client with the current picture, the layout too (null when none is
+  // saved, so the browser seeds it), so a reconnect resyncs.
   try { ws.send(JSON.stringify({ t: 'surface', payload: bus.surface })) } catch {}
-  if (layout) { try { ws.send(JSON.stringify({ t: 'layout', layout, from: '' })) } catch {} }
+  try { ws.send(JSON.stringify({ t: 'layout', layout, from: '' })) } catch {}
   try { ws.send(JSON.stringify({ t: 'spaces', spaces: workerList() })) } catch {}
   try { ws.send(JSON.stringify({ t: 'reminders', ...remindersView() })) } catch {}
   try { ws.send(JSON.stringify({ t: 'context', ctx: orchCtx(readOrchContext()) })) } catch {}
@@ -3406,15 +3480,13 @@ function loadPersisted() {
 }
 loadPersisted()
 
-// Tighten what earlier runs left: every .jeeves-* file owner-only; MCP configs holding a
-// previous boot's tokens (the old shared .jeeves-mcp.json and .jeeves-mcp-worker.json, and
-// per-session ones) removed — every spawn writes its own.
+// Tighten what earlier runs left: the state dir and everything in it owner-only; MCP configs
+// holding a previous boot's tokens removed — every spawn writes its own.
 function tidyPrivateFiles() {
-  for (const n of ['.jeeves-mcp.json', '.jeeves-mcp-worker.json']) { try { unlinkSync(join(__dirname, n)) } catch {} }
   try { for (const n of readdirSync(SESSIONS_DIR)) if (n.endsWith('.mcp.json')) { try { unlinkSync(join(SESSIONS_DIR, n)) } catch {} } } catch {}
-  for (const n of readdirSync(__dirname)) {
-    if (!n.startsWith('.jeeves-')) continue
-    const f = join(__dirname, n)
+  try { chmodSync(STATE_DIR, 0o700) } catch {}
+  for (const n of readdirSync(STATE_DIR)) {
+    const f = join(STATE_DIR, n)
     try { chmodSync(f, statSync(f).isDirectory() ? 0o700 : PRIVATE) } catch {}
   }
   try { for (const n of readdirSync(SESSIONS_DIR)) chmodSync(join(SESSIONS_DIR, n), PRIVATE) } catch {}

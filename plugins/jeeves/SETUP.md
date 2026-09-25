@@ -74,7 +74,7 @@ Every project inherits these. Bold-label fields sit under `##` headings; `review
 | Confluence | **Plans parent** | Folder your plans nest under: `<Plans parent> > <display name>`. | — |
 | GitHub | **review scope** | `mine` = PRs requesting or reviewed by you; `repo` = also every open non-draft teammate PR. Set `repo` per project, not here. | `mine` |
 | GitHub | **base branches** | Branch-name conventions `--scan` tries, in order. | origin's default |
-| frontmatter | `reviewCommand` | What `review <pr>` runs. | `/code-review` |
+| frontmatter | `reviewCommand` | What a review runs — `review <pr>` and a story PR's own. | `/code-review` |
 | frontmatter | `seedFiles` | Gitignored files copied from the main checkout into every new worktree, comma-separated (a file missing from a checkout is skipped). | none |
 | Loop | **tick seconds** | Wait between ticks (30–86400). | `300` |
 | Loop | **tick mid-flight seconds** | Wait while a worker is running. | `120` |
@@ -88,7 +88,9 @@ Every project inherits these. Bold-label fields sit under `##` headings; `review
 | Notifications | **notify worker finished** | Push when a dispatched worker's report lands. | `on` |
 | Notifications | **notify review ready** | Push when a reviewer's compiled report lands. | `on` |
 
-The loop reads `defaults.md` at launch, so a change applies on the orchestrator's next Restart.
+The loop reads `defaults.md` at launch, so a change applies on the orchestrator's next Restart —
+except, under the cockpit, the tick and overnight fields: `now()` reads them on every call, so they
+apply at the next tick.
 Settings adds a missing field under its section heading. Any tick shortens its wait so it fires by
 the next reminder's due time.
 
@@ -218,6 +220,9 @@ boot.
 | `workerPermission` | `JEEVES_WORKER_PERMISSION` | `auto` | Workers' permission mode. Keep it equal to the orchestrator's — worker messages reach the orchestrator unprompted only between sessions in the same mode. |
 | `rotatePct` | `JEEVES_ORCH_ROTATE_PCT` | `70` | Context share (1–100 %) at which the `ctx` badge turns red and Restart lights. |
 | `compactPct` | `JEEVES_ORCH_COMPACT_PCT` | `40` | Context share (0–100 %) at which an idle orchestrator, with no worker running, runs `/compact`. `0` = never. |
+| `atlassianServer` | `JEEVES_ATLASSIAN_SERVER` | `claude_ai_Atlassian_Rovo` | The MCP server the loop uses for Jira and Confluence, as its tool names spell it (`mcp__<name>__getJiraIssue`): letters, digits, `_` and `-`. Set it when Atlassian is connected under another name (`claude mcp add`). Applies on the orchestrator's next Restart. |
+| `claudeTui` | — | `fullscreen` | Claude Code's renderer in every session the cockpit launches: `fullscreen` · `default`. |
+| `scrollSpeed` | — | `3` | Lines per mouse-wheel step in fullscreen (1–20). |
 | `detachMinutes` | — | `30` | Minutes a tab with no browser attached lives before it's ended (0–10080; `0` = never). The orchestrator and workers are never ended. |
 | `uiFont` | `JEEVES_UI_FONT` | `Roboto` | The UI font: a Google Fonts family name (letters, digits, spaces and `-`, up to 60), or `system` for the OS font. |
 | `monoFont` | `JEEVES_MONO_FONT` | `Roboto Mono` | The font for terminals, diffs and code, same format. |
@@ -250,6 +255,7 @@ Each teammate gets their own folder automatically. One page per ticket, revised 
 
 ## Dependencies
 - **`gh`** authenticated — GitHub queries and PR writes.
-- **Atlassian Rovo MCP** — Jira queries and Confluence plan pages.
+- **Atlassian MCP** — Jira queries and Confluence plan pages: the claude.ai Atlassian Rovo
+  connector, or another server named in `cockpit.json` `atlassianServer`.
 - **A git-repo cwd for reviews** — the review command (default `/code-review`) runs in the repo
   checkout. Under the cockpit, reviewer sessions do; headless, the main loop must be in a git repo.

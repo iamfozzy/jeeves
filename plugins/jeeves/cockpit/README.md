@@ -32,9 +32,11 @@ pull requests that touch `plugins/jeeves/` and on pushes to `develop`.
 
 ## Server
 
-One HTTP server on `HOST:PORT` (loopback by default). Every request — HTTP, WebSocket upgrade and
-`/mcp` — must carry a `Host` of `127.0.0.1` or `localhost` (with the port), and a browser `Origin`
-must match it, which shuts out DNS rebinding. Request bodies cap at 1 MB (413).
+One HTTP server on `HOST:PORT` (loopback by default). Access is gated by token, not by `Host` or
+`Origin`, so a tunnel such as ngrok works under any hostname with no configuration: `/api/*` and
+both WebSockets need the browser token, `/api/hook` and `/api/usage` their own tokens, and `/mcp` a
+per-session bearer token. Only the static UI is served without one. Request bodies cap at 1 MB
+(413).
 
 - **`/api/*`** — token-gated JSON: repos and config, git status / changes / file diffs, PR status,
   PR list and description, branches and worktrees, worktree create/remove, file upload, open in
@@ -53,9 +55,9 @@ must match it, which shuts out DNS rebinding. Request bodies cap at 1 MB (413).
   browser resyncs. A client more than ~4 MB behind is dropped rather than buffered.
 - **`/mcp`** — the MCP control plane (streamable HTTP). Each launched session has its own MCP
   token, minted at spawn and mapped server-side to a role and caller: the orchestrator gets every
-  tool below except the child-tab tools, a worker `report` and the child-tab tools, a claude tab
-  only the child-tab tools. Nothing in the query string picks the role. A session's transport is
-  dropped when its PTY exits or after it sits idle.
+  tool below except the child-tab tools, a worker `report` and the child-tab tools (callable only
+  when its agent sets no tool list), a claude tab only the child-tab tools. Nothing in the query
+  string picks the role. A session's transport is dropped when its PTY exits or after it sits idle.
 - Everything else serves the built UI from `dist/`.
 
 ### PTY sessions
@@ -91,24 +93,26 @@ browser's colour scheme (the variant of the user's Claude Code theme — `dark-a
 `light-ansi` in a light UI); and a status line (`bin/statusline.mjs --relay`) that relays the rate
 limits to the cockpit, then prints the user's own status line — or the built-in line when the
 user's command fails or hangs. Every claude also gets a `--mcp-config` file carrying its own MCP
-token, which gives workers and tabs the [child-tab tools](#child-tabs). Both files live in
-`.jeeves-sessions/`, mode 0600, and are passed by path: no token is ever on a command line. The
+token, which the server maps to that session's [MCP tools](#mcp-tools). Both files live in
+`<data-home>/.cockpit/sessions/`, mode 0600, and are passed by path: no token is ever on a command line. The
 hooks and the status line reach the server with their own narrow tokens (from the session's
 environment), each good for one endpoint.
 
-The orchestrator is launched with `--tools=Read,Grep,Glob,Edit,Write,Skill,ToolSearch,ScheduleWakeup,SendMessage,ListAgents,PushNotification`
-— no shell, no native subagents — and a `PreToolUse` hook on every tool, MCP included
-(`bin/guard-orchestrator.mjs`), that allows by tool name and structured arguments and refuses the
-rest. Read/Grep/Glob: only under the data home, the plugin, the OS temp dir, the session's own
-tool-results folder, or a `JEEVES_REPORT.md` in a worktree (paths resolved with realpath). Edit/Write:
-only under the data home, and never `projects/*/state.md` or `reminders.md` (those go through
-`write_state`). Skill: only `loop`. The cockpit's MCP tools and the listed built-ins pass; so do the
-Atlassian reads, `createConfluencePage`, `updateConfluencePage`, `addCommentToJiraIssue` and
-`transitionJiraIssue`. Everything else — Bash, Agent/Task, Workflow, WebFetch, any other MCP
-server — is refused with a pointer to `dispatch`. It fails closed: unreadable hook input or an error
-of its own is refused. The hooks drive the status dots (working · awaiting · idle · exited)
-and let the server follow the live session id across `/clear` and `/resume`, so a respawn resumes
-the current conversation. A worker's `report` outcome (done / blocked / error) sticks; hooks never
+The orchestrator never investigates and never does the work; it reads, checks status, keeps its
+own files and housekeeps, and dispatches the rest. It is launched with
+`--tools=Read,Grep,Glob,Edit,Write,Bash,Skill,ToolSearch,ScheduleWakeup,SendMessage,ListAgents,PushNotification`
+— no Agent or Task: every agent runs through `dispatch`, which gives it a worktree, `report()` and
+a dashboard row — and a `PreToolUse` hook on every tool, MCP included
+(`bin/guard-orchestrator.mjs`). Read/Grep/Glob, Bash (not parsed: the brief carries the rule) and
+every MCP server's tools pass. Edit/Write/NotebookEdit pass under the data home and the
+orchestrator's Claude memory folder (`<claude config>/projects/<data-home slug>/memory`), never on
+`projects/*/state.md` or `reminders.md` (those go through `write_state`) or in `.cockpit/`
+(paths resolved with realpath). Agent, Task and Workflow are refused with a pointer to `dispatch`;
+review and PR skills (`*review*`, `simplify`, `create-pr`) with a pointer to the worker whose job
+they are; `/jeeves:setup` with a pointer to a tab of its own; AskUserQuestion with a pointer to
+NEEDS YOU. It fails closed: unreadable hook input or an error of its own is refused. The hooks
+drive the status dots (working · awaiting · idle · exited) and let the server follow the live
+session id across `/clear` and `/resume`, so a respawn resumes the current conversation. A worker's `report` outcome (done / blocked / error) sticks; hooks never
 overwrite it.
 
 PTYs die with the server. After a restart, the orchestrator, workers and claude tabs respawn on
@@ -180,7 +184,7 @@ takes `{ op: 'save', agent: { name, description, tools, model, prompt }, isNew? 
 may not be `worker`; saving a built-in's name writes an override with
 `base: <hash>`, and deleting it restores the built-in. Only `<data-home>/agents/` is written.
 
-A report is stored on the worker's record in `.jeeves-workers.json`, so `inbox` returns it even
+A report is stored on the worker's record in `<data-home>/.cockpit/workers.json`, so `inbox` returns it even
 after a server restart; reports for a worker whose record is gone are held in memory only.
 
 `JEEVES_REPORT.md` is listed in the repo's `.git/info/exclude`, so it is never committed and never
@@ -191,16 +195,19 @@ touches a pushed branch or PR.
 
 ## MCP tools
 
-The orchestrator gets all of these except `report` and the child-tab tools; workers get `report`
-and the child-tab tools; claude tabs get only the child-tab tools. The GitHub tools run `gh` /
-`git` with an argv the server builds (never a shell), refuse any caller value starting with `-`,
-and cut output at 20 000 characters with `truncated: true`. Headless (`/jeeves:start` outside
-the cockpit), none exist and the loop falls back to Task dispatch and terminal output.
+The orchestrator gets all of these except `report` and the child-tab tools; workers get `report` and
+the child-tab tools; claude tabs get only the child-tab tools. A worker whose agent names its tools
+— every built-in does — can call only those plus `report`, `SendMessage` and `ToolSearch`
+([Workers](#workers)), so the child-tab tools reach claude tabs and workers with no tool list. The
+GitHub tools run `gh` / `git` with an argv the server builds (never a shell), refuse any caller
+value starting with `-`, and cut output at 20 000 characters with `truncated: true`. Headless
+(`/jeeves:start` outside the cockpit), none exist and the loop falls back to Task dispatch and
+terminal output.
 
 | Tool | Contract |
 |---|---|
 | `surface_render` | Paints the dashboard. Row sections `stories` · `myPrs` · `qa` · `reviews`, plus `inFlight` and `quiet`. Applied in order: a full section replaces that section whole (`[]` clears it; an omitted one is left as is); `upsert: { <section>: [rows] }` replaces each row with the same identity or appends it; `remove: { <section>: [ids] }` deletes by identity. Identity is `<repo>#<number>` for `myPrs` / `reviews` (from `number`, else a leading `#123` in `item`) and `<repo>:<KEY>` for `stories` / `qa` (from `key`, else a leading Jira key); the repo tag matches by id, `owner/name` or bare name. `inFlight` and `quiet` are full-replace only. Returns per-section row counts plus rejected rows (no identity) and remove ids that matched nothing. Rows carry `dot` (`red` · `yellow` · `green` · `white`) and `actions` (`{ label, run }` sends `run` to the orchestrator; `type: true` types it without submitting; `{ label, href }` opens a link). Reminders aren't painted: the server watches `reminders.md` and pushes every row to the dashboard over `/events`. |
-| `dispatch` | `{ agent, repo, prompt, ticket?, branch?, model? }` → `{ workId, sid, cwd, branch }`, plus `reused: true, ahead, behind` when it reused a worktree. Branch defaults to `<agent>-<ticket>`. An `agent` naming an agent file runs the session as it ([Workers](#workers)); the description lists the built-in and user agents with their descriptions, read when each MCP session starts. A branch that already has a worktree reuses it (clearing a stale `JEEVES_REPORT.md`) unless a live worker holds it or it has uncommitted changes — then it errors and says why. |
+| `dispatch` | `{ agent, repo, prompt, ticket?, branch?, model? }` → `{ workId, sid, cwd, branch }`, plus `reused: true, ahead, behind` when it reused a worktree. Branch defaults to `<agent>-<ticket>`. An `agent` naming an agent file runs the session as it ([Workers](#workers)); the description lists the built-in and user agents with their descriptions, read when each MCP session starts. A branch that already has a worktree reuses it (clearing a stale `JEEVES_REPORT.md`) unless a live worker holds it or it has uncommitted changes — then it errors and says why. A new worktree clears its path first: a folder there that git doesn't list as a worktree is renamed to `<name>.stale-<YYYYMMDDHHMMSS>` (UTC), never deleted, and returned as `movedAside`; a registered worktree whose folder is gone is pruned (`git worktree prune`). |
 | `tick_snapshot` | Orchestrator only. `{ full? }` → compact JSON: `{ projects, jira }` on an MCP session's first call or with `full: true`, else `{ delta, jira }`. With `full: true` it also returns `index` (per project `id, repo, path, jiraKey, baseBranch, repoWide, jiraOverride`), `ledgers` (per project `{ ledger: true, rows }`, or `{ ledger: false, raw }` for a legacy prose file) and `agents` (name and description of the built-in and the user's agents). The project set is rescanned from `projects/*/project.md`, so a project added outside the cockpit appears without a restart. Runs BRIEF *Each tick* step 1's GitHub search with `gh api graphql`, built from the project index and identity (`mine` / `requested` / `reviewed` / `scope` aliases, scope split to stay within 256 characters, each alias paged up to 10 pages), keeping only index repos. Per project, `myPrs` and `reviews` PRs carry `number, title, url, head, base, headRefOid`, plus when set `isDraft, reviewDecision, checks, missingKey`, and for review candidates `author, requested, reviewers, myReview`. A delta is per project `{ myPrs?, reviews?: { added?, changed?, removed? }, unchanged }` against the session's last complete call. `jira` is `[{ args, qaColumns? }]`: step 2's `searchJiraIssuesUsingJql` args (`maxResults` 50) per distinct cloudId / QA field / QA columns (QA field = the user in any status, `OR key in` the open ledger rows' keys), not run by the server. `{ error, jira }` when gh is missing, unauthenticated or the query fails; `incomplete: { <alias>: reason }` when a later page fails. |
 | `report` | `{ workId, status?, summary, pr?, verdict?, threads? }` — a worker's result. |
 | `inbox` | Drains unacknowledged reports (`peek: true` leaves them). Also returns `tabs: [{ tabRef, space, kind, prompt, openedAt, status }]` — every tab the orchestrator opened and hasn't closed, kept across `/compact` and restarts; `status` is `working` · `awaiting` · `idle` · `exited` · `not started`. |
@@ -228,18 +235,19 @@ in full.
 
 ### Child tabs
 
-A worker or claude tab can open a sub-agent the user can watch: `open_tab` picks a `tabRef`, which is
-also the new tab's id, and records the pending launch. The browser adds the tab — to the caller's
-own space for a claude tab, or to a space on the worker's worktree, opened in the background and
-reused by later calls, for a worker. The tab's first attach finds the pending launch by the id in
-its `sid` and starts `claude <prompt>` or `codex <prompt>` in that worktree. The prompt ends by
-asking for the result at `<worktree>/.jeeves-tabs/<tabRef>.md` (the folder self-ignores). `wait_tab`
-polls that file every 2 s and returns it once its size holds across two polls. A tab only answers to
-the session that opened it. Links live in server memory; after a restart a child is an ordinary tab.
+A claude tab, or a worker whose agent sets no tool list, can open a sub-agent the user can watch:
+`open_tab` picks a `tabRef`, which is also the new tab's id, and records the pending launch. The
+browser adds the tab — to the caller's own space for a claude tab, or to a space on the worker's
+worktree, opened in the background and reused by later calls, for a worker. The tab's first attach
+finds the pending launch by the id in its `sid` and starts `claude <prompt>` or `codex <prompt>` in
+that worktree. The prompt ends by asking for the result at `<worktree>/.jeeves-tabs/<tabRef>.md`
+(the folder self-ignores). `wait_tab` polls that file every 2 s and returns it once its size holds
+across two polls. A tab only answers to the session that opened it. Links live in server memory;
+after a restart a child is an ordinary tab.
 
 ## Auth
 
-- **Browser token** — from `$JEEVES_TOKEN`, else `cockpit/.jeeves-token` (created on first boot,
+- **Browser token** — from `$JEEVES_TOKEN`, else `<data-home>/.cockpit/token` (created on first boot,
   kept across restarts). The launch URL carries it once; the UI stores it in `localStorage`, strips
   it from the address bar, and sends it as a bearer header (or `?token=` on WebSockets). Settings →
   Jeeves → **Rotate token** writes a new one; the old stops working at once, every socket opened
@@ -260,17 +268,21 @@ can boot.
 
 | File | Holds |
 |---|---|
-| `cockpit/.jeeves-token` | The browser token. |
-| `cockpit/.jeeves-sessions/` | Each launched claude's `--mcp-config` and `--settings` files, named by session. |
-| `cockpit/.jeeves-orch-session` | The orchestrator's session id, following `/clear`, so a restart resumes that conversation. |
-| `cockpit/.jeeves-workers.json` | Dispatched workers: workId, session id, agent, model, repo, branch, worktree, status, last report and whether it was drained. Workers whose worktree is gone are dropped on boot. |
-| `cockpit/.jeeves-tabs.json` | Claude tab → session id and cwd, so tabs resume after a restart. |
-| `cockpit/.jeeves-layout.json` | Open spaces and their tabs, Scratchpad tabs, pinned and recent repos. Every browser loads it from `/api/layout` and saves back to it, and a save is pushed to the other open browsers, so the Vite dev UI and the built UI show the same spaces. |
+| `<data-home>/.cockpit/token` | The browser token. |
+| `<data-home>/.cockpit/sessions/` | Each launched claude's `--mcp-config` and `--settings` files, named by session. |
+| `<data-home>/.cockpit/orch-session` | The orchestrator's session id, following `/clear`, so a restart resumes that conversation. |
+| `<data-home>/.cockpit/workers.json` | Dispatched workers: workId, session id, agent, model, repo, branch, worktree, status, last report and whether it was drained. Workers whose worktree is gone are dropped on boot. |
+| `<data-home>/.cockpit/tabs.json` | Claude tab → session id and cwd, so tabs resume after a restart. |
+| `<data-home>/.cockpit/orch-tabs.json` | Tabs the orchestrator opened (`open_space`, `add_tab`), so `close_tab` and `inbox` still know them after a restart or a `/compact`. |
+| `<data-home>/.cockpit/layout.json` | Open spaces and their tabs, Scratchpad tabs, pinned and recent repos. Every browser loads it from `/api/layout` and saves back to it, and a save is pushed to the other open browsers, so the Vite dev UI and the built UI show the same spaces. |
 | `<data-home>/cockpit.json` | Cockpit settings (`SETUP.md`). |
 | `<data-home>/…` | Config, ledgers and reminders, read and written in place. |
 | browser `localStorage` | Token, active space, collapsed repos, git-panel visibility, dashboard repo filter, and a copy of the layout that paints before `/api/layout` answers. A browser's first load folds its own spaces into the server's layout. |
 
-The `.jeeves-*` files are gitignored and owner-only (mode 0600, re-applied at boot). Every state
+Runtime state lives in `<data-home>/.cockpit/`, outside the plugin folder, so a plugin update (a
+new versioned folder) keeps it; a first boot with no such folder moves in the `.jeeves-*` files an
+earlier cockpit kept beside `server.mjs`. The folder is owner-only (0700, its files 0600, re-applied
+at boot), and the orchestrator guard refuses edits in it. Every state
 and config write goes through a temp file and a rename, one writer per file at a time.
 
 Config writes (Settings, `update_config`, `update_project`) edit markdown in place: bold-label fields and

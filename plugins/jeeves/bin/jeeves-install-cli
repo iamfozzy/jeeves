@@ -17,7 +17,7 @@ cat > "$dir/jeeves" <<'SH'
 set -euo pipefail
 command -v node >/dev/null 2>&1 || { echo "jeeves: 'node' is not on PATH." >&2; exit 1; }
 mjs="$(ls -dt "$HOME"/.claude/plugins/cache/*/jeeves/*/cockpit/bin/cockpit.mjs \
-              "$HOME"/.claude/plugins/marketplaces/*/plugins/jeeves/cockpit/bin/cockpit.mjs 2>/dev/null | head -1 || true)"
+              "$HOME"/.claude/plugins/marketplaces/*/plugins/jeeves/cockpit/bin/cockpit.mjs 2>/dev/null | grep -v '\.bak-[0-9]' | head -1 || true)"
 [ -n "${mjs:-}" ] || { echo "jeeves: no installed jeeves plugin found — install it in Claude Code first." >&2; exit 1; }
 exec node "$mjs" "$@"
 SH
@@ -66,7 +66,11 @@ case ":$PATH:" in
        line="export PATH=\"$dir:\$PATH\""
        case "${SHELL:-}" in
          */zsh) rc="$HOME/.zshrc" ;;
-         */bash) rc="$HOME/.bashrc"; [ -e "$rc" ] || rc="$HOME/.bash_profile" ;;
+         # Terminal.app runs login shells, which read .bash_profile, not .bashrc — prefer it
+         # on macOS regardless of which one already exists.
+         */bash) if [ "$(uname -s)" = "Darwin" ]; then rc="$HOME/.bash_profile"
+                 else rc="$HOME/.bashrc"; [ -e "$rc" ] || rc="$HOME/.bash_profile"
+                 fi ;;
          *) rc="" ;;
        esac
        if [ -n "$rc" ]; then

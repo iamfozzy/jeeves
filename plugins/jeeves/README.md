@@ -9,10 +9,12 @@ browser **cockpit**: a live dashboard on the right, real terminal spaces on the 
 Everything runs on your machine. The cockpit is loopback-only and token-gated; each teammate runs
 their own, nothing is shared over the network.
 
-Under the cockpit the loop's orchestrator has no shell and spawns no subagents: it reads status
-(PRs, checks, tickets, its own files) through typed cockpit tools and dispatches every piece of
-work — code, reviews, investigation — to a worker you can watch. Headless (`/jeeves:start` in a
-plain session) it has the full toolset, and the same rules hold by prompt alone.
+Under the cockpit the loop's orchestrator never investigates and never does the work: looking
+into a story or an issue, code changes, builds and tests go to a dispatched worker you can watch.
+It reads anything, runs status commands and does the routine housekeeping itself (removing
+finished worktrees, pruning stale ones, closing spent workers); it hands you only what is yours to
+decide — merges, posting reviews, approving plans. Headless (`/jeeves:start` in a plain session)
+the same rules hold by prompt alone.
 
 - **First run?** → [Getting started](#getting-started).
 - **Field reference** (`defaults.md`, `project.md`, `identity.md`, `cockpit.json`, env vars,
@@ -23,9 +25,11 @@ plain session) it has the full toolset, and the same rules hold by prompt alone.
 
 - **Claude Code** with this `jeeves` plugin installed: `/plugin marketplace add iamfozzy/jeeves`,
   then `/plugin install jeeves@jeeves`. Reviews use the built-in `/code-review`.
-- **Node.js ≥ 20** (the cockpit server + UI build).
+- **Node.js ≥ 22.12** (the cockpit server + UI build).
 - **`gh`** installed and authenticated (`gh auth login`) — GitHub queries and PR writes.
-- **Atlassian Rovo MCP** connected in Claude Code — Jira queries and Confluence plan pages.
+- **Atlassian MCP** connected in Claude Code — Jira queries and Confluence plan pages. The claude.ai
+  Atlassian Rovo connector works as-is; a server added another way (`claude mcp add`) needs its name
+  in `cockpit.json` `atlassianServer` (Settings → Jeeves → Models & permissions).
 - A C/C++ toolchain for the cockpit's native `node-pty`:
   - **macOS**: `xcode-select --install`
   - **Windows**: the "Desktop development with C++" workload (Visual Studio Build Tools) — usually
@@ -79,8 +83,8 @@ needed. (For a plain terminal command, see [Shortcuts](#shortcuts--the-jeeves-te
 
 Jeeves ticks on its own (every 5 minutes by default, faster while a worker runs, slower overnight)
 and repaints only what changed. However many projects you configure, a tick costs one GitHub query
-and one Jira query. Leave it running — the orchestrator and dispatched workers carry on with the
-browser closed.
+and one Jira query, plus a comment check on each plan awaiting your approval. Leave it running —
+the orchestrator and dispatched workers carry on with the browser closed.
 
 ### The dashboard
 
@@ -114,18 +118,19 @@ row's ⋮ menu. Nothing runs until you ask.
 | Command | Does |
 |---|---|
 | `plan <TICKET>` | Plans a ticket you moved to In Progress: publishes a Confluence plan page with a story breakdown, links it from the ticket. Shared Jira key → `plan <TICKET> in <repo>`. |
-| `approve <TICKET>` / `approve <TICKET> S1, S3` | Approves the plan (or only those stories) — Jeeves dispatches one worker per story, in parallel where dependencies allow. |
+| `approve <TICKET>` / `approve <TICKET> S1, S3` | Approves the plan (or only those stories) — Jeeves dispatches one worker per story, in parallel where dependencies allow, and reviews each story PR once `loop-verifier` approves it. |
 | `change <TICKET>: …` | Sends the change to the planner, which revises the plan. Comments on the ticket or the plan page work too. |
-| `review <pr>` | Runs a review of a teammate's PR (your review command, default `/code-review`). |
-| `comment <pr>` / `approve <pr>` / `request-changes <pr>` | The reviewer that wrote the review posts it with that verdict, via `gh pr review`. Nothing posts until you pick one. |
-| `resolve <pr>` | Addresses the change requests on your own PR, pushes, and resolves the threads it fixed. |
+| `review <pr>` | Runs a review of a PR (your review command, default `/code-review`) — a teammate's, or a re-review of your own. |
+| `comment <pr>` / `approve <pr>` / `request-changes <pr>` / `drop <pr>` | The reviewer that wrote the review posts it with that verdict, via `gh pr review`, or `drop` discards it. Nothing posts until you pick one. On your own PR GitHub allows only `comment`; `resolve <pr>` then addresses its threads. |
+| `resolve <pr>` | A worker addresses the review feedback on your own PR and pushes; once `loop-verifier` approves the fixes, Jeeves replies to and resolves each thread they fixed. |
 | `qa <KEY>` | Prints the ticket's testing instructions and opens it in the browser. Read-only. |
 | `run <agent> on <ticket \| #pr \| repo>` | Dispatches one of your agents (Settings → Agents) on that target, as a worker in its own worktree. Cockpit only. Jeeves may suggest one when an item matches the agent's description. |
 | `remind 15:00 …` / `remind in 2h …` / `remind tomorrow 9am …` | Sets a reminder; it surfaces (and pushes a notification) when due. |
 | `done <id>` / `snooze <id> 1h` | Clears or moves a reminder. |
 
-Jeeves never merges, never posts a review until you pick its verdict, and never touches `.env`,
-`auth/`, `payments/`, `secrets/` or `credentials/` — the shipped baseline rules
+Jeeves never merges, never posts a review until you pick its verdict, never touches `.env`,
+`auth/`, `payments/`, `secrets/` or `credentials/`, and touches `.github/workflows/` only when
+you asked for that change — the shipped baseline rules
 ([`loop-constraints.md`](loop-constraints.md)), plus any of your own (Settings → Jeeves).
 
 ### Spaces and terminals
@@ -189,8 +194,8 @@ The header's ⚙ opens five tabs. Field-by-field reference: [`SETUP.md`](SETUP.m
   Roboto Mono and 13 px. Saved in `cockpit.json`, so every browser matches; a save applies in
   every open cockpit tab at once.
 
-Model, permission and hygiene changes apply to sessions spawned afterwards; loop cadence,
-notifications and constraints apply on the orchestrator's next Restart. A setting pinned by an
+Model, permission and hygiene changes apply to sessions spawned afterwards; loop cadence applies
+at the next tick; notifications and constraints apply on the orchestrator's next Restart. A setting pinned by an
 environment variable shows as read-only.
 
 ## Updating
@@ -204,7 +209,9 @@ Jeeves is two parts that update differently:
   during an update, **restart it** (stop it and run `/jeeves:cockpit` again) to pick up server
   changes, then hard-reload the browser tab.
 - **Your data home** (`~/jeeves`: identity, defaults, project configs, ledgers, reminders, your
-  agents, cockpit settings) is yours and is **never touched** by an update. A customised built-in
+  agents, cockpit settings, and the cockpit's runtime state in `.cockpit/`) is yours and is **never
+  touched** by an update, so the browser token, the orchestrator's conversation, dispatched workers
+  and your layout carry over. A customised built-in
   agent keeps your version for cockpit dispatches (headless dispatches use the plugin's); Settings →
   Agents flags it when the update changed the built-in. Your additions in
   `~/jeeves/loop-constraints.md` layer on top of the updated baseline.

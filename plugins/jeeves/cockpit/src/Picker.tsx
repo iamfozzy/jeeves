@@ -107,7 +107,7 @@ export function Picker({ opened, onClose, placeholder, items }: {
                   className="ck-space"
                   data-active={i === cur}
                   onClick={() => pick(it)}
-                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(it) } }}
+                  onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(it) } }}
                   onMouseMove={() => { if (i !== cur) setActive(i) }}
                   style={{ borderRadius: 8, padding: '7px 9px', width: '100%', background: i === cur ? 'var(--ck-active)' : 'transparent' }}
                 >

@@ -1,6 +1,6 @@
 # Jeeves identity
 
-The Signal J pairs a sturdy initial with a single signal dot: a point of focus for the orchestrator. Lavender and orchid connect it to the cockpit's existing palette. The geometric lowercase wordmark is drawn as paths, so it needs no installed font.
+The Signal J pairs a sturdy initial with a single signal dot: a point of focus for the orchestrator. Lavender and orchid match the cockpit's palette. The geometric lowercase wordmark is drawn as paths, so it needs no installed font.
 
 See `brand-preview.png` for the identity on dark and light surfaces and at small sizes.
 
@@ -16,8 +16,9 @@ See `brand-preview.png` for the identity on dark and light surfaces and at small
 - `public/icon-{192,512}.png`: app icons.
 - `public/icon-maskable-512.png`: full-bleed icon with an inset mark for OS masking.
 - `public/site.webmanifest`: app name, colors, and icon declarations.
+- `public/logo.svg`: a copy of `jeeves-icon.svg` at a compatibility path.
 
-The compatibility path `public/logo.svg` also serves the new mark. The main app and design preview both use the new brand asset.
+The app and the design preview both use these assets.
 
 ## Usage
 
@@ -27,7 +28,7 @@ Colors: graphite `#18171d`, lavender `#bca2ff`, orchid `#e480d7`, porcelain `#f5
 
 ## Export
 
-SVGs are the editable source. The design was authored directly as vectors to fit the existing SVG-based app; no image-generation model was used.
+SVGs are the editable source, drawn as vectors to suit the SVG-based app.
 
 Run `python3 scripts/export-brand-icons.py` on macOS to regenerate PNG and ICO assets using Quick Look and sips. These raster app icons deliberately have square full-bleed backgrounds so operating systems can apply their own masks. The SVG favicon uses rounded corners.
 

@@ -21,7 +21,8 @@ You change nothing but your report file: no edits, commits, pushes or comments.
    each one and where it's satisfied. None given → ESCALATE_HUMAN, don't guess.
 2. **Scope**: only files the task needs; no unrelated edits, drive-by refactors or formatting churn;
    nothing under the constraints' never-edit paths (`.env*`, `auth/`, `payments/`, `secrets/`,
-   `credentials/`, `.github/workflows/` unless the task says so).
+   `credentials/`), and nothing under `.github/workflows/` unless the user asked for that change
+   and the task says so.
 3. **Tests**: you ran the repo's tests and linters yourself and quote the command and result. Don't
    trust the implementer's claim. New behaviour has a test that would fail without the change.
 4. **CI**: `gh pr checks <pr>` is green. Pending → wait for it (`gh pr checks <pr> --watch`); failing

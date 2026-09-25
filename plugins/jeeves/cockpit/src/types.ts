@@ -39,7 +39,7 @@ export type ConfigView = {
   projects: ProjectView[]
 }
 // ── Settings: cockpit.json + the cockpit's address (GET/POST /api/settings) ──
-export type CockpitKey = 'orchModel' | 'orchEffort' | 'workerModel' | 'orchPermission' | 'workerPermission' | 'rotatePct' | 'compactPct' | 'detachMinutes' | 'claudeTui' | 'scrollSpeed'
+export type CockpitKey = 'orchModel' | 'orchEffort' | 'workerModel' | 'orchPermission' | 'workerPermission' | 'rotatePct' | 'compactPct' | 'detachMinutes' | 'claudeTui' | 'scrollSpeed' | 'atlassianServer'
   | 'uiFont' | 'monoFont' | 'terminalFontSize'
 export type CockpitView = {
   values: Record<CockpitKey, string | number>
@@ -228,9 +228,26 @@ export function mergeLocalSpaces(localSpaces: Space[], serverSpaces: Space[]): S
 // Which tab is active in a space is a per-browser choice (like activeSpaceId, never
 // synced): once this browser has picked one, that choice wins over whatever another
 // browser last saved for the same space. A space this browser has never chosen a
-// tab in yet keeps the incoming value (e.g. a space another browser just opened).
+// tab in yet keeps the incoming value (e.g. a space another browser just opened),
+// and so does one whose chosen tab has since closed.
 export function applyOwnActiveTabs(spaces: Space[], own: Record<string, string>): Space[] {
-  return spaces.map((s) => (own[s.id] ? { ...s, activeTabId: own[s.id] } : s))
+  return spaces.map((s) => (own[s.id] && s.tabs.some((t) => t.id === own[s.id]) ? { ...s, activeTabId: own[s.id] } : s))
+}
+
+// This browser's tab choices, minus any whose space or tab no longer exists.
+export function pruneActiveTabs(own: Record<string, string>, spaces: Space[]): Record<string, string> {
+  return Object.fromEntries(Object.entries(own).filter(([id, tab]) => spaces.some((s) => s.id === id && s.tabs.some((t) => t.id === tab))))
+}
+
+// What to do with a layout the server sends (on connect, or another browser's save).
+// 'seed': the server has none, so this browser's copy becomes it. 'keep' this
+// browser's copy and save it: while its own save is in flight (the push predates
+// that save), or when a connect push meets changes this browser never got saved (a
+// failed save, edits made while disconnected). Otherwise 'apply' the server's.
+export function remoteLayoutAction(p: { hasLayout: boolean; connect: boolean; saving: boolean; dirty: boolean }): 'seed' | 'keep' | 'apply' {
+  if (!p.hasLayout) return 'seed'
+  if (p.saving || (p.connect && p.dirty)) return 'keep'
+  return 'apply'
 }
 
 // The wire layout never carries per-browser tab selection: comparing (and marking

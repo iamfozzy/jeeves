@@ -16,14 +16,16 @@ import { readFileSync } from 'node:fs'
 import http from 'node:http'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { isatty } from 'node:tty'
 import { fileURLToPath } from 'node:url'
 
 // A TTY never sends the JSON Claude Code pipes in, so reading it would just
-// block forever waiting for input (or Ctrl-D) that's never coming.
-const readStdin = () => { if (process.stdin.isTTY) return ''; try { return readFileSync(0, 'utf8') } catch { return '' } }
-const raw = readStdin()
-let j = {}
-try { j = JSON.parse(raw) } catch {}
+// block forever waiting for input (or Ctrl-D) that's never coming. isatty, not
+// process.stdin.isTTY: touching process.stdin makes a pipe non-blocking, and the
+// read then fails with EAGAIN whenever the JSON lands after the script starts.
+const readStdin = () => { if (isatty(0)) return ''; try { return readFileSync(0, 'utf8') } catch { return '' } }
+// Read once the CLI runs (below), so importing killTree for a test never waits on stdin.
+let raw = '', j = {}
 const get = (path) => path.split('.').reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), j)
 const relay = process.argv.includes('--relay')
 
@@ -47,7 +49,7 @@ function userCommand() {
   if (process.env.JEEVES_STATUSLINE_CHAINED) return null
   try {
     const cmd = JSON.parse(readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf8')).statusLine?.command
-    return typeof cmd === 'string' && cmd.trim() && !/statusline\.mjs/.test(cmd) ? cmd : null
+    return typeof cmd === 'string' && cmd.trim() && !/jeeves-statusline\.mjs/.test(cmd) ? cmd : null
   } catch { return null }
 }
 
@@ -109,6 +111,8 @@ function render() {
 // Guarded so killTree (above) can be imported for a unit test without also running
 // the CLI's own stdin-to-stdout pass.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  raw = readStdin()
+  try { j = JSON.parse(raw) } catch {}
   try {
     if (relay) await report()
     const cmd = relay ? userCommand() : null
