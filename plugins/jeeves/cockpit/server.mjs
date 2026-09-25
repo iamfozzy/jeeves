@@ -2827,16 +2827,31 @@ function buildMcpServer(role, caller) {
   })
 
   if (full) srv.registerTool('write_state', {
-    description: "Persist a project's state.md (your per-tick memory), or with file: 'reminders' the data home's reminders.md, or with file: 'daily' its daily.md, by passing the FULL new contents. Use this instead of the Edit/Write tool so the user's terminal isn't filled with state diffs — it writes the file server-side.",
+    description: "Persist a project's state.md (your per-tick memory), or with file: 'reminders' the data home's reminders.md, or with file: 'daily' its daily.md. Pass `edits` to change rows in place — each { old, new } like the Edit tool: old must match exactly once — or `markdown` with the FULL new contents to rewrite the file. Use this, never the Edit/Write tool, for these files.",
     inputSchema: {
       project: z.string().optional().describe("Project id — the projects/<id> folder name. Required when file is 'state'."),
       file: z.enum(['state', 'reminders', 'daily']).optional().describe("'state' (default) = projects/<id>/state.md; 'reminders' = <data-home>/reminders.md; 'daily' = <data-home>/daily.md."),
-      markdown: z.string().describe('The complete new contents of the file.')
+      markdown: z.string().optional().describe('The complete new contents of the file. Give this or edits.'),
+      edits: z.array(z.object({ old: z.string(), new: z.string() })).optional().describe('In-place changes, applied in order: each old must occur exactly once in the file as it stands.')
     }
-  }, async ({ project, file = 'state', markdown }) => {
+  }, async ({ project, file = 'state', markdown, edits }) => {
     if (file === 'state' && !REPOS.find((r) => r.id === project)) return { content: [{ type: 'text', text: 'unknown project: ' + project }], isError: true }
+    if ((markdown == null) === !edits?.length) return { content: [{ type: 'text', text: 'give markdown (the whole file) or edits, not both' }], isError: true }
     const path = file === 'reminders' ? REMINDERS_FILE : file === 'daily' ? join(NEUTRAL, 'daily.md') : join(NEUTRAL, 'projects', project, 'state.md')
-    try { await withLock(path, () => atomicWrite(path, String(markdown))) }
+    try {
+      await withLock(path, () => {
+        let text = String(markdown ?? '')
+        if (edits?.length) {
+          text = existsSync(path) ? readFileSync(path, 'utf8') : ''
+          for (const e of edits) {
+            const n = e.old ? text.split(e.old).length - 1 : 0
+            if (n !== 1) throw new Error(`edit old text found ${n} times (must be exactly once): ${String(e.old).slice(0, 80)}`)
+            text = text.replace(e.old, () => e.new)
+          }
+        }
+        atomicWrite(path, text)
+      })
+    }
     catch (e) { return { content: [{ type: 'text', text: 'write failed: ' + e.message }], isError: true } }
     return { content: [{ type: 'text', text: 'state saved' }] }
   })
@@ -2919,10 +2934,13 @@ function buildMcpServer(role, caller) {
       path: z.string().optional().describe('Path of an existing worktree to open directly.'),
       tab: z.enum(['claude', 'shell', 'codex']).optional().describe('Kind of the first tab (default claude; shell when command is given).'),
       command: z.string().optional().describe('A shell command the first tab starts running, for the USER to watch or use — e.g. "yarn install && yarn dev --port 7173". Opens a shell tab.'),
+      prompt: z.string().optional().describe(`The first message the first (claude) tab starts on — e.g. the user's question plus the context you hold (up to ${MAX_TAB_PROMPT} characters).`),
       label: z.string().optional().describe('Display name for the space; defaults to the branch / PR / worktree.')
     }
   }, async (a) => {
     if (a.command && a.tab && a.tab !== 'shell') return bad('command runs in a shell tab — drop tab or pass tab: "shell"')
+    if (a.prompt != null && (a.command || (a.tab && a.tab !== 'claude'))) return bad('prompt starts a claude tab — drop command, and tab or pass tab: "claude"')
+    if (a.prompt != null && (!a.prompt.trim() || a.prompt.length > MAX_TAB_PROMPT)) return bad(`prompt must be 1–${MAX_TAB_PROMPT} characters`)
     const r = a.repo ? findRepo(a.repo) : null
     if (a.repo && !r) return bad('unknown repo: ' + a.repo)
     if (!r && !a.path) return bad('give a repo, or a path for a folder space')
@@ -2955,6 +2973,7 @@ function buildMcpServer(role, caller) {
     const spaceRef = 'os' + randomBytes(3).toString('hex')
     const kind = a.command ? 'shell' : a.tab || 'claude', tab = { id: randomBytes(3).toString('hex'), kind }
     if (a.command) { pendingLaunches.set(tab.id, { kind, command: a.command, at: Date.now() }); logUserRun('open_space', a.command) }
+    if (a.prompt != null) pendingLaunches.set(tab.id, { kind, prompt: a.prompt, at: Date.now() })
     addOrchTab({ tabRef: tab.id, space: spaceRef, kind, ...(a.command ? { command: a.command } : {}) })
     broadcast({ t: 'open_space', cmd: { id: spaceRef, repoId: r?.id ?? '', cwd, label, kind, tab } })
     return { content: [{ type: 'text', text: `opening space “${label}” → ${cwd} (spaceRef: ${spaceRef}, tabRef: ${tab.id})` }], structuredContent: { spaceRef, tabRef: tab.id, cwd, label } }

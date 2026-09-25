@@ -115,7 +115,7 @@ row's ⋮ menu. Nothing runs until you ask.
 |---|---|
 | `plan <TICKET>` | Plans a ticket you moved to In Progress: publishes a Confluence plan page with a story breakdown, links it from the ticket. Shared Jira key → `plan <TICKET> in <repo>`. |
 | `approve <TICKET>` / `approve <TICKET> S1, S3` | Approves the plan (or only those stories) — Jeeves dispatches one worker per story, in parallel where dependencies allow. |
-| `change <TICKET>: …` | Revises the plan. Comments on the ticket work too. |
+| `change <TICKET>: …` | Sends the change to the planner, which revises the plan. Comments on the ticket or the plan page work too. |
 | `review <pr>` | Runs a review of a teammate's PR (your review command, default `/code-review`). |
 | `comment <pr>` / `approve <pr>` / `request-changes <pr>` | The reviewer that wrote the review posts it with that verdict, via `gh pr review`. Nothing posts until you pick one. |
 | `resolve <pr>` | Addresses the change requests on your own PR, pushes, and resolves the threads it fixed. |

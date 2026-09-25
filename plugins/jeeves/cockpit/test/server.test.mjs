@@ -451,6 +451,16 @@ test('orchestrator tabs: add_tab, inbox, close_tab, and a restart', { skip: POSI
     assert.equal((await claudeArgs()).at(-1), 'hello there')
     ws.close()
 
+    freshArgs()
+    const opened = await mcp.raw('open_space', { repo: 'demo', prompt: 'why does X?' })
+    assert.ok(!opened.isError, JSON.stringify(opened.content))
+    const { spaceRef, tabRef, cwd } = opened.structuredContent
+    const asked = await pty(`${spaceRef}:${tabRef}`, 'claude', cwd)
+    assert.equal((await claudeArgs()).at(-1), 'why does X?', 'the first claude tab starts on the prompt')
+    asked.close()
+    assert.ok((await mcp.raw('open_space', { repo: 'demo', command: 'ls', prompt: 'x' })).isError, 'a prompt is for a claude tab')
+    assert.ok((await mcp.raw('open_space', { repo: 'demo', prompt: ' ' })).isError, 'an empty prompt')
+
     assert.ok((await mcp.raw('add_tab', { space: 'scratch', spaceRef: 'os1' })).isError, 'one of space or spaceRef')
     assert.ok((await mcp.raw('add_tab', { space: 'scratch', tab: 'shell', prompt: 'x' })).isError, 'a prompt is for claude tabs')
     assert.ok((await mcp.raw('close_tab', { tabRef: 'tp1abc' })).isError, 'only tabs the orchestrator opened')
@@ -766,6 +776,16 @@ test('now, open_url, read_spill, write_state daily, update_config', async (t) =>
     await t.test('write_state writes daily.md', async () => {
       await call('write_state', { file: 'daily', markdown: '# daily\n' })
       assert.equal(readFileSync(join(DATA, 'daily.md'), 'utf8'), '# daily\n')
+    })
+    await t.test('write_state edits change rows in place, each old matching exactly once', async () => {
+      await call('write_state', { file: 'daily', markdown: '- a · open\n- b · open\n' })
+      await call('write_state', { file: 'daily', edits: [{ old: '- a · open', new: '- a · done' }] })
+      assert.equal(readFileSync(join(DATA, 'daily.md'), 'utf8'), '- a · done\n- b · open\n')
+      assert.ok((await raw('write_state', { file: 'daily', edits: [{ old: ' · ', new: 'x' }] })).isError, 'an old that matches twice')
+      assert.ok((await raw('write_state', { file: 'daily', edits: [{ old: 'missing', new: 'x' }] })).isError, 'an old that matches nothing')
+      assert.ok((await raw('write_state', { file: 'daily', markdown: 'x', edits: [{ old: 'a', new: 'b' }] })).isError, 'both markdown and edits')
+      assert.ok((await raw('write_state', { file: 'daily' })).isError, 'neither')
+      assert.equal(readFileSync(join(DATA, 'daily.md'), 'utf8'), '- a · done\n- b · open\n', 'a refused edit writes nothing')
     })
     await t.test('update_config', async () => {
       await call('update_config', { file: 'identity', set: { confluencePlansFolderId: '12345' } })

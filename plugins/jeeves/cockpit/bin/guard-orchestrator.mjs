@@ -97,7 +97,8 @@ const PLAIN = new Set(['ToolSearch', 'ScheduleWakeup', 'SendMessage', 'ListAgent
 const ATLASSIAN = new Set(['getJiraIssue', 'searchJiraIssuesUsingJql', 'fetch', 'search', 'getConfluencePage', 'getConfluencePageFooterComments',
   'getConfluencePageInlineComments', 'getConfluencePageDescendants', 'getPagesInConfluenceSpace', 'getConfluenceSpaces', 'searchConfluenceUsingCql',
   'getAccessibleAtlassianResources', 'atlassianUserInfo', 'lookupJiraAccountId', 'getTransitionsForJiraIssue', 'createConfluencePage',
-  'updateConfluencePage', 'addCommentToJiraIssue', 'transitionJiraIssue', 'addTeamworkGraphContext'])
+  'updateConfluencePage', 'createConfluenceInlineComment', 'createConfluenceFooterComment', 'getConfluenceCommentChildren',
+  'addCommentToJiraIssue', 'transitionJiraIssue', 'addTeamworkGraphContext'])
 
 function main() {
   if (PLAIN.has(tool) || tool.startsWith('mcp__cockpit__')) allow()
@@ -127,8 +128,8 @@ function main() {
     if (rel === null) block(`Blocked: you're the orchestrator — you never edit files outside the data home (${file}). ${DISPATCH}`)
     const parts = ledgerOf(rel)
     if (!parts) allow()
-    const which = parts.length === 1 ? `{ file: "reminders", markdown }` : `{ project: "${parts[1]}", markdown }`
-    block(`Blocked: under the cockpit, ${rel} is written with mcp__cockpit__write_state(${which}), the whole file, never Edit/Write, so state diffs stay out of the user's terminal. Resend it through write_state (load it with ToolSearch if it's deferred).`)
+    const which = parts.length === 1 ? `{ file: "reminders", edits: [{ old, new }] }` : `{ project: "${parts[1]}", edits: [{ old, new }] }`
+    block(`Blocked: under the cockpit, ${rel} is changed with mcp__cockpit__write_state(${which}) — the same old/new as Edit (or markdown for the whole file) — never Edit/Write, so state diffs stay out of the user's terminal. Resend it through write_state (load it with ToolSearch if it's deferred).`)
   }
 
   if (tool === 'Skill') {

@@ -58,3 +58,13 @@ The test plan.
 
 Under the cockpit, report through the steps in your system prompt with the plan above as `summary`;
 `JEEVES_REPORT.md` is the one file you write, via Bash. Headless, return the plan above as text.
+
+## Revisions
+Stay available after reporting: until the plan is approved, the loop sends you the user's
+comments on it (from the ticket or the plan page), or a fresh planner gets the current plan and the
+comments in its prompt. Treat each comment as a question about the code, not a request to agree:
+check it against the repo the way you researched the plan. Then report, as a new report:
+- **Changed sections** — each section you changed, in full, under its heading from the shape above.
+  None → say so.
+- **Replies** — one per comment, keyed by the comment id you were given: what you found and what you
+  changed, or why the plan already covers it. Plain English, a few sentences.

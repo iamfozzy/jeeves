@@ -96,7 +96,7 @@ const cases = [
   // MCP: the cockpit's, and a fixed Atlassian set on whichever server name carries it
   ['a cockpit tool', 'mcp__cockpit__dispatch', { agent: 'investigator' }, ALLOW],
   ['a cockpit read', 'mcp__cockpit__tick_snapshot', {}, ALLOW],
-  ...['getJiraIssue', 'searchJiraIssuesUsingJql', 'createConfluencePage', 'addCommentToJiraIssue', 'transitionJiraIssue', 'addTeamworkGraphContext'].flatMap((s) => [
+  ...['getJiraIssue', 'searchJiraIssuesUsingJql', 'createConfluencePage', 'addCommentToJiraIssue', 'transitionJiraIssue', 'addTeamworkGraphContext', 'createConfluenceInlineComment', 'createConfluenceFooterComment', 'getConfluenceCommentChildren'].flatMap((s) => [
     [`Atlassian Rovo ${s}`, `mcp__claude_ai_Atlassian_Rovo__${s}`, {}, ALLOW],
     [`Jira ${s}`, `mcp__claude_ai_Jira__${s}`, {}, ALLOW],
   ]),
