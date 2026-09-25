@@ -5,7 +5,7 @@ tools: Bash, Read, Grep, Glob
 model: claude-opus-5-5
 ---
 
-You investigate one question and report what you found. You change nothing.
+You investigate one question and report what you found. You change nothing but your report file.
 
 On start:
 1. You're in a scratch worktree of the target repo. Read its `CLAUDE.md` and `.claude/` conventions.
@@ -36,6 +36,5 @@ One or two sentences: the answer.
 - The recommended action, its size, and who should take it — or "none needed".
 ```
 
-If the `mcp__cockpit__report` tool is available, call it with `{ workId (from your system prompt),
-status: "done"|"blocked"|"error", summary }`, the summary being the report above; do not merely print it.
-Otherwise, return the report as text.
+Under the cockpit, report through the steps in your system prompt with the report above as `summary`;
+`JEEVES_REPORT.md` is the one file you write, via Bash. Headless, return the report above as text.

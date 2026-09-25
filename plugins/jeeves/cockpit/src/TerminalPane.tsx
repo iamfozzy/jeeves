@@ -7,6 +7,7 @@ import { withToken } from './token'
 import { uploadFile } from './api'
 import { fontStack, useAppearance, whenFontLoaded } from './theme'
 import { createPtyLink, type LinkState, type PtyLink, type SocketLike } from './ptyLink'
+import { altArrowBytes, globalKeyBytes } from './keys'
 
 // Terminal palettes follow the app's colour scheme. Each carries a full 16-colour
 // ANSI palette tuned for its background, so shells and claude's -ansi themes (which
@@ -21,19 +22,14 @@ export const XTERM_THEMES = {
   }
 }
 
+const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform)
 // A keydown that lands outside every editable element goes to the active terminal.
 const EDITABLE = 'input, textarea, select, [contenteditable]:not([contenteditable="false"]), .xterm'
 const OVERLAY = '[role="dialog"], [role="menu"], [role="listbox"]'
 const INTERACTIVE = 'button, a[href], summary, [role="button"], [role="tab"], [role="link"], [role="checkbox"], [role="switch"], [role="option"]'
-// The bytes xterm would send for a key, or null for keys left unhandled. Focus
-// moves to the terminal on keydown, too late for xterm to see the event itself.
-function keyBytes(e: KeyboardEvent, appCursor: boolean): string | null {
-  const arrow = { ArrowUp: 'A', ArrowDown: 'B', ArrowRight: 'C', ArrowLeft: 'D' }[e.key]
-  if (arrow) return (appCursor ? '\x1bO' : '\x1b[') + arrow
-  const named: Record<string, string> = { Enter: '\r', Backspace: '\x7f', Tab: '\t', Escape: '\x1b' }
-  if (named[e.key]) return named[e.key]
-  return e.key.length === 1 ? e.key : null
-}
+// Mouse tracking (1000/1002/1003/1006) and focus reporting (1004) off: the program
+// that turned them on has exited, and an ended pane must not answer a click.
+const RESET_MODES = '\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l'
 
 // One PTY over one WebSocket, rendered by xterm. Mounted once per tab and kept
 // alive across tab switches; `active` drives fit + focus when it becomes visible.
@@ -46,11 +42,12 @@ export function TerminalPane({ sid, cwd, cmd, active, onTitle }: { sid: string; 
   const onTitleRef = useRef(onTitle)
   onTitleRef.current = onTitle
   const linkRef = useRef<PtyLink | null>(null)
-  const [link, setLink] = useState<{ state: LinkState; code?: number }>({ state: 'connecting' })
+  const [link, setLink] = useState<{ state: LinkState; code?: number; reason?: string }>({ state: 'connecting' })
   const activeRef = useRef(active)
   activeRef.current = active
   const dragDepth = useRef(0) // enter/leave counter — a bare currentTarget check leaves the overlay stuck over child nodes
   const [dragOver, setDragOver] = useState(false)
+  const [uploadErr, setUploadErr] = useState<string | null>(null)
   const scheme = useComputedColorScheme('dark')
   const schemeRef = useRef(scheme)
   schemeRef.current = scheme
@@ -76,6 +73,13 @@ export function TerminalPane({ sid, cwd, cmd, active, onTitle }: { sid: string; 
     term.loadAddon(fit)
     term.open(el)
     termRef.current = term
+    term.attachCustomKeyEventHandler((e) => {
+      const bytes = e.type === 'keydown' ? altArrowBytes(e, IS_MAC) : null
+      if (bytes === null) return true
+      e.preventDefault()
+      term.input(bytes)
+      return false
+    })
 
     // The URL is built per connect, so a reconnect carries a rotated token and the
     // current scheme. `cid` names this pane to the server, which drops input frames
@@ -112,8 +116,8 @@ export function TerminalPane({ sid, cwd, cmd, active, onTitle }: { sid: string; 
       clearTimeout: (id) => window.clearTimeout(id),
       onOpen: (fresh) => { if (!fresh) term.reset(); refit(); if (activeRef.current) term.focus() },
       onOutput: (d) => term.write(d),
-      onExit: (code) => term.write(`\r\n[session ended: ${code}]\r\n`),
-      onState: (state, code) => setLink({ state, code })
+      onExit: (code) => term.write(`${RESET_MODES}\r\n[session ended: ${code}]\r\n`),
+      onState: (state, code, reason) => setLink({ state, code, reason })
     })
     linkRef.current = link
     link.start()
@@ -128,24 +132,27 @@ export function TerminalPane({ sid, cwd, cmd, active, onTitle }: { sid: string; 
     const onOnline = () => link.check(true)
     document.addEventListener('visibilitychange', onVisible)
     window.addEventListener('online', onOnline)
-    const dataSub = term.onData((d) => link.input(d))
+    // Only a real keypress restarts an ended (or failed) pane, never a mouse or focus
+    // report or a paste, and that key is not sent to the new session: onKey fires
+    // just before the key's onData.
+    const stopped = () => link.state === 'ended' || link.state === 'failed'
+    let swallow = false
+    const keySub = term.onKey(() => { if (stopped()) { link.revive(); swallow = true } })
+    const dataSub = term.onData((d) => { if (swallow) { swallow = false; return } link.input(d) })
 
     // A key pressed while focus sits outside any editable element (after a click on
-    // a dashboard button, say) goes to the active, visible terminal. Printable keys,
-    // Enter, Backspace, Tab, Escape and arrows are forwarded; other keys only move
-    // focus. On a button or link, Enter, Space and Tab keep their native meaning.
-    // Chords are left alone: App.tsx owns ⌘P/Ctrl+P, and the browser owns the rest.
+    // a dashboard button, say) goes to the active, visible terminal; keys.ts decides
+    // which keys and what bytes. Any other key is left to the page and the browser.
     const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || e.isComposing || e.metaKey || e.ctrlKey) return
-      if (!activeRef.current || !el.offsetWidth || !el.offsetHeight) return
+      if (e.defaultPrevented || !activeRef.current || !el.offsetWidth || !el.offsetHeight) return
       const t = e.target instanceof Element ? e.target : null
       if (t?.closest(EDITABLE) || document.querySelector(OVERLAY)) return
-      if (t?.closest(INTERACTIVE) && (e.key === 'Enter' || e.key === ' ' || e.key === 'Tab')) return
-      if (['Shift', 'Alt', 'Control', 'Meta', 'CapsLock', 'Dead', 'Unidentified'].includes(e.key)) return
+      const bytes = globalKeyBytes(e, term.modes.applicationCursorKeysMode, !!t?.closest(INTERACTIVE))
+      if (!bytes) return
       e.preventDefault()
       term.focus()
-      const bytes = keyBytes(e, term.modes.applicationCursorKeysMode)
-      if (bytes) term.input(bytes, true)
+      if (stopped()) link.revive()
+      else term.input(bytes, true)
     }
     window.addEventListener('keydown', onKey)
     const titleSub = term.onTitleChange((t) => onTitleRef.current?.(t))
@@ -160,7 +167,7 @@ export function TerminalPane({ sid, cwd, cmd, active, onTitle }: { sid: string; 
       document.removeEventListener('visibilitychange', onVisible)
       window.removeEventListener('online', onOnline)
       window.removeEventListener('keydown', onKey)
-      ro.disconnect(); dataSub.dispose(); titleSub.dispose(); link.dispose(); term.dispose()
+      ro.disconnect(); keySub.dispose(); dataSub.dispose(); titleSub.dispose(); link.dispose(); term.dispose()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -208,16 +215,23 @@ export function TerminalPane({ sid, cwd, cmd, active, onTitle }: { sid: string; 
   // Only a drag carrying files is a drop target — not a tab being reordered.
   const hasFiles = (e: React.DragEvent) => e.dataTransfer.types.includes('Files')
   // Drop files onto the pane → upload to <cwd>/.jeeves-uploads/ and type the
-  // resulting path(s) into the session's input, ready to reference.
+  // resulting path(s) into the session's input, ready to reference. An ended or
+  // failed pane has no session to type into, so a drop there does nothing.
   const onDrop = async (e: React.DragEvent) => {
     e.preventDefault(); dragDepth.current = 0; setDragOver(false)
     const files = Array.from(e.dataTransfer.files)
-    if (!files.length) return
-    const results = await Promise.all(files.map((f) => uploadFile(cwd, f).catch(() => ({} as { path?: string }))))
+    const st = linkRef.current?.state
+    if (!files.length || st === 'ended' || st === 'failed') return
+    const results = await Promise.all(files.map((f) => uploadFile(cwd, f).catch((e: Error): { path?: string; error?: string } => ({ error: e.message }))))
     const paths = results.map((r) => r.path).filter((p): p is string => !!p)
     if (paths.length) {
       linkRef.current?.input(paths.map((p) => (/\s/.test(p) ? `'${p}'` : p)).join(' ') + ' ')
       termRef.current?.focus()
+    }
+    const err = results.find((r) => r.error)?.error
+    if (err) {
+      setUploadErr(err)
+      window.setTimeout(() => setUploadErr((cur) => (cur === err ? null : cur)), 4000)
     }
   }
 
@@ -231,15 +245,27 @@ export function TerminalPane({ sid, cwd, cmd, active, onTitle }: { sid: string; 
       style={{ position: 'relative', height: '100%', width: '100%', background: XTERM_THEMES[scheme].background, padding: '10px 12px', boxSizing: 'border-box' }}
     >
       <div ref={ref} style={{ height: '100%', width: '100%' }} />
-      {(link.state === 'reconnecting' || link.state === 'ended') && (
+      {(link.state === 'reconnecting' || link.state === 'ended' || link.state === 'failed') && (
         <div style={{
           position: 'absolute', top: 8, right: 10, zIndex: 4, pointerEvents: 'none',
           padding: '3px 9px', borderRadius: 6, border: '1px solid var(--ck-border)',
           background: 'var(--ck-surface)', boxShadow: '0 1px 3px rgba(0,0,0,.18)',
           font: '500 12px var(--mantine-font-family)',
-          color: link.state === 'ended' ? 'var(--mantine-color-dimmed)' : 'var(--ck-yellow)'
+          color: link.state === 'ended' ? 'var(--mantine-color-dimmed)' : link.state === 'failed' ? 'var(--mantine-color-red-6)' : 'var(--ck-yellow)'
         }}>
-          {link.state === 'ended' ? `session ended${link.code ? ` (${link.code})` : ''} — press any key to restart` : 'reconnecting…'}
+          {link.state === 'ended' ? `session ended${link.code ? ` (${link.code})` : ''} — press any key to restart`
+            : link.state === 'failed' ? `can't connect: ${link.reason} — press any key to retry`
+            : 'reconnecting…'}
+        </div>
+      )}
+      {uploadErr && (
+        <div style={{
+          position: 'absolute', top: 8, left: 10, zIndex: 4, pointerEvents: 'none',
+          padding: '3px 9px', borderRadius: 6, border: '1px solid var(--ck-border)',
+          background: 'var(--ck-surface)', boxShadow: '0 1px 3px rgba(0,0,0,.18)',
+          font: '500 12px var(--mantine-font-family)', color: 'var(--mantine-color-red-6)'
+        }}>
+          upload failed: {uploadErr}
         </div>
       )}
       {dragOver && (

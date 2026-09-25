@@ -1,9 +1,7 @@
 # Loop constraints — my local additions
 
-These are appended to the plugin's baseline (`loop-constraints.md`), which always applies and
-updates on its own. Add only your **extra or tightened** rules here — don't copy the baseline.
-A rule here that directly contradicts a baseline rule overrides it; everything else stacks.
-
+Appended to the plugin's baseline (`loop-constraints.md`), which always applies. Add only your
+**extra or tightened** rules; a rule here that directly contradicts a baseline rule overrides it.
 Leave this file empty to run the baseline unchanged. Example additions:
 
 <!--

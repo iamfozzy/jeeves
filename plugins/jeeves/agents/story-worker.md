@@ -24,13 +24,14 @@ Then:
 6. Run the repo's tests and linters. Fix what you break; don't leave it. Never skip, disable or loosen a
    test to get green. Three failed attempts at the same failure → stop and report it as blocked.
 7. Commit following the repo's conventions (conventional commits unless it says otherwise). Open a PR
-   with `gh pr create`: the ticket key first in the title (`ABC-123: …`) when there is a ticket, and a
+   with `gh pr create`: the ticket key first in the title (`[ABC-123] …`) when there is a ticket, and a
    what-and-why body with how you tested it. If your prompt names an existing PR's branch (a merge
    conflict, a red build, a follow-up), commit and push to that branch instead — don't open a new PR.
 8. Once the PR is up, watch its checks (`gh pr checks <pr> --watch`). Red → fix it on the branch
    (step 6's attempt limit applies). Report only when they're green or you're blocked.
 
-Do not merge. Do not touch other stories' worktrees. If the `mcp__cockpit__report` tool is
-available, call it with `{ workId (from your system prompt), status: "done"|"blocked"|"error",
-summary, pr? }` to report your result — do not merely print it. Otherwise, return your result as
-text: what you did, the PR link, the test and CI result, anything the user should know.
+Do not merge. Do not touch other stories' worktrees.
+
+Your report says what you did, the PR link, the test and CI result, and anything the user should
+know. Under the cockpit, report through the steps in your system prompt with the PR as `pr`;
+headless, return it as text.

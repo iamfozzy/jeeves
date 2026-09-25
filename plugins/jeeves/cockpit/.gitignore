@@ -6,6 +6,8 @@ dist/
 .jeeves-mcp.json
 .jeeves-workers.json
 .jeeves-tabs.json
+.jeeves-orch-tabs.json
 .jeeves-layout.json
 .jeeves-orch-session
 .jeeves-mcp-worker.json
+.jeeves-sessions/

@@ -47,7 +47,9 @@ if (forceBuild || distStale()) {
 }
 
 // 3. Start the server (it prints its URL), then open the browser at it.
-const srv = spawn('node', ['server.mjs'], { cwd: root, stdio: 'inherit', env: process.env })
+// process.execPath: the node binary already running this file, so it works even
+// when a bare `node` isn't on PATH (e.g. launched via an nvm/fnm shim).
+const srv = spawn(process.execPath, ['server.mjs'], { cwd: root, stdio: 'inherit', env: process.env })
 srv.on('exit', (c) => process.exit(c ?? 0))
 
 // Open the browser once the server answers and its token file exists — a first run

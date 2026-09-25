@@ -3,6 +3,7 @@ import { ActionIcon, Badge, Box, Button, Collapse, Group, Kbd, Popover, ScrollAr
 import { IconArrowUpRight, IconFolder, IconFolderOpen, IconHome, IconLayoutGrid, IconPin, IconPinFilled, IconPlus, IconRobot, IconTerminal2 } from '@tabler/icons-react'
 import { CloseConfirm } from './CloseConfirm'
 import { Section } from './Section'
+import { isHttpUrl } from './api'
 import type { GitInfo, RepoCfg, Space, WorkerSpace, WorkerStatus } from './types'
 
 export const WORKER_DOT: Record<WorkerStatus, string> = {
@@ -26,16 +27,6 @@ export function spaceDot(s: Space, ss: Record<string, string>): { color: string;
   const rank = (st: string) => SESSION_RANK[st as WorkerStatus] ?? 9
   const best = [...statuses].sort((a, b) => rank(a) - rank(b))[0]
   return { color: WORKER_DOT[best as WorkerStatus] ?? 'var(--mantine-color-gray-6)', label: best }
-}
-
-// Urgency band for a repo row: 0 = a claude tab or worker is awaiting/blocked/error,
-// 1 = something is working, 2 = the rest. Bands collapse SESSION_RANK's tail.
-function repoBand(spaces: Space[], workers: WorkerSpace[], ss: Record<string, string>): number {
-  const ranks = [
-    ...spaces.map((s) => spaceDot(s, ss).label),
-    ...workers.map((w) => w.status)
-  ].map((st) => (st ? SESSION_RANK[st as WorkerStatus] ?? 9 : 9))
-  return Math.min(2, ...ranks)
 }
 
 // Git state for a space row: `dirty` shows the changed-file pill at the row's end, and
@@ -74,9 +65,13 @@ function SpaceCloseBody({ space, title, ownsWorktree, onCancel, onClose }: {
   const [err, setErr] = useState<string | null>(null)
   const run = async (wt: 'keep' | 'delete' | 'force') => {
     setBusy(true)
-    const e = await onClose(wt)
-    setBusy(false)
-    setErr(e)
+    try {
+      setErr(await onClose(wt))
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'failed to close')
+    } finally {
+      setBusy(false)
+    }
   }
   const refused = !!err && /uncommitted|refus/i.test(err)
   return (
@@ -203,36 +198,46 @@ export function Sidebar({
     try { localStorage.setItem('jeeves-cockpit-collapsed', JSON.stringify(next)) } catch {}
     return next
   })
-  // Only repos with something in them (a space, a dispatched worker) or pinned,
-  // pinned first, then most urgent first within each group, then by slug.
+  // Only repos with something in them (a space, a dispatched worker) or pinned, in an
+  // order that never moves by itself: pinned repos in pin order, then by when the repo's
+  // first space was opened, then worker-only repos in dispatch order. Status shows on
+  // the dots, never in the order.
+  const at = (i: number) => (i < 0 ? Infinity : i) // not found → after every found one
   const visible = repos
     .map((repo) => {
       const repoSpaces = spaces.filter((s) => s.repoId === repo.id)
       const repoWorkers = workers.filter((w) => w.repo === repo.id)
       const isPinned = pinned.includes(repo.id)
-      return { repo, repoSpaces, repoWorkers, isPinned, band: repoBand(repoSpaces, repoWorkers, sessionStatus) }
+      return {
+        repo, repoSpaces, repoWorkers, isPinned,
+        pinAt: at(pinned.indexOf(repo.id)),
+        spaceAt: at(spaces.findIndex((s) => s.repoId === repo.id)),
+        workerAt: at(workers.findIndex((w) => w.repo === repo.id))
+      }
     })
     .filter((r) => r.isPinned || r.repoSpaces.length || r.repoWorkers.length)
-    .sort((a, b) => Number(b.isPinned) - Number(a.isPinned) || a.band - b.band || a.repo.slug.localeCompare(b.repo.slug))
-  // One space row: status dot · branch (or name) · changes · ↑/↓, with details and close.
-  // `where` is its repo's slug, or a folder space's path.
-  const spaceRow = (s: Space, where: string) => {
+    .sort((a, b) => a.pinAt - b.pinAt || a.spaceAt - b.spaceAt || a.workerAt - b.workerAt || a.repo.slug.localeCompare(b.repo.slug))
+  // One space row: status dot · branch (or name) · changes, with close.
+  const spaceRow = (s: Space) => {
     const git = gitBySpace[s.id]
     const active = s.id === activeSpaceId
     const dot = spaceDot(s, sessionStatus)
     // The branch, or the space name when there's no git.
     const title = (git?.git && git.branch) || s.name
     const state = git?.git ? gitState(git) : null
-    const tabKinds = s.tabs.map((t) => t.kind).join(', ')
-    // One line: status dot · branch, then the uncommitted-file count on the right; the rest
-    // (ahead/behind included) behind the ? button.
+    // One line: status dot · branch, then the uncommitted-file count on the right.
     return (
       <UnstyledButton
         key={s.id}
+        component="div"
+        role="button"
+        tabIndex={0}
         className="ck-space"
         data-active={active}
         onClick={() => onSelectSpace(s.id)}
-        style={{ padding: '7px 12px', ...(active ? { background: 'var(--ck-active)' } : {}) }}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectSpace(s.id) } }}
+        // Indented under its repo (or Folders) header, clear of the tree line; the highlight stays full width.
+        style={{ padding: '7px 12px 7px 20px', ...(active ? { background: 'var(--ck-active)' } : {}) }}
       >
         <Group gap={9} wrap="nowrap">
           <Box style={{ width: 14, display: 'flex', justifyContent: 'center', flex: 'none' }}>
@@ -248,20 +253,6 @@ export function Sidebar({
           <Box style={{ flex: 1 }} />
           {state?.dirty && git ? <ChangedPill n={git.changed} /> : null}
           <Group gap={6} wrap="nowrap" style={{ flex: 'none' }}>
-          <DetailsButton label="Space details">
-            <Box>
-              <Text size="xs" c="dimmed" mb={2}>{where}</Text>
-              <Text size="sm" fw={600} lh={1.4} style={{ wordBreak: 'break-word' }}>{title}</Text>
-            </Box>
-            <CardField label={s.repoId ? 'Worktree' : 'Folder'}><Text size="xs" ff="monospace" style={{ wordBreak: 'break-all' }}>{s.cwd}</Text></CardField>
-            {git ? (
-              <CardField label="Git">
-                <Text size="sm">{!git.git ? 'not a git worktree' : state ? state.tooltip : 'clean and in sync'}</Text>
-              </CardField>
-            ) : null}
-            <CardField label="Claude"><Text size="sm">{dot.label ?? 'no claude session'}</Text></CardField>
-            <CardField label="Tabs"><Text size="sm">{s.tabs.length ? `${s.tabs.length} · ${tabKinds}` : 'None'}</Text></CardField>
-          </DetailsButton>
           <CloseConfirm opened={confirmId === s.id} onChange={(o) => setConfirmId(o ? s.id : null)} label="Close space" size={20}>
             <SpaceCloseBody space={s} title={title} ownsWorktree={ownsWorktree(s)}
               onCancel={() => setConfirmId(null)} onClose={(wt) => onCloseSpace(s.id, wt)} />
@@ -325,8 +316,8 @@ export function Sidebar({
             </ActionIcon>
           </Tooltip>
         </Group>
-        <Collapse in={!collapsed[FOLDERS] && folders.length > 0}>
-          <Stack gap={0}>{folders.map((s) => spaceRow(s, s.cwd))}</Stack>
+        <Collapse expanded={!collapsed[FOLDERS] && folders.length > 0}>
+          <Stack gap={0} className="ck-tree">{folders.map((s) => spaceRow(s))}</Stack>
         </Collapse>
       </Box>
       {visible.map(({ repo, repoSpaces, repoWorkers, isPinned }) => {
@@ -373,9 +364,9 @@ export function Sidebar({
               </Tooltip>
             </Group>
 
-            <Collapse in={!isCollapsed && repoSpaces.length > 0}>
-                  <Stack gap={0}>
-                    {repoSpaces.map((s) => spaceRow(s, repo.slug))}
+            <Collapse expanded={!isCollapsed && repoSpaces.length > 0}>
+                  <Stack gap={0} className="ck-tree">
+                    {repoSpaces.map((s) => spaceRow(s))}
                   </Stack>
             </Collapse>
           </Box>
@@ -393,9 +384,13 @@ export function Sidebar({
               return (
                 <UnstyledButton
                   key={w.workId}
+                  component="div"
+                  role="button"
+                  tabIndex={0}
                   className="ck-space"
                   data-active={active}
                   onClick={() => onSelectSpace('work:' + w.workId)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectSpace('work:' + w.workId) } }}
                   style={{ padding: '7px 12px', ...(active ? { background: 'var(--ck-active)' } : {}) }}
                 >
                   <Group gap={9} wrap="nowrap">
@@ -413,7 +408,7 @@ export function Sidebar({
                         <CardField label="Status"><Text size="sm">{w.status}</Text></CardField>
                         <CardField label="Branch"><Text size="sm" style={{ wordBreak: 'break-word' }}>{w.branch}</Text></CardField>
                         <CardField label="Worktree"><Text size="xs" ff="monospace" style={{ wordBreak: 'break-all' }}>{w.cwd}</Text></CardField>
-                        {w.pr ? <CardField label="PR"><Text size="sm"><a className="ck-link" href={w.pr} target="_blank" rel="noreferrer" style={{ wordBreak: 'break-all' }}>{w.pr}</a></Text></CardField> : null}
+                        {w.pr ? <CardField label="PR"><Text size="sm" style={{ wordBreak: 'break-all' }}>{isHttpUrl(w.pr) ? <a className="ck-link" href={w.pr} target="_blank" rel="noreferrer">{w.pr}</a> : w.pr}</Text></CardField> : null}
                         {w.summary ? (
                           <CardField label="Summary">
                             <ScrollArea.Autosize mah={160} type="auto">

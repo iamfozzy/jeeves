@@ -41,7 +41,7 @@ export function Picker({ opened, onClose, placeholder, items }: {
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
   const [picked, setPicked] = useState(false)
-  const rows = useRef<(HTMLButtonElement | null)[]>([])
+  const rows = useRef<(HTMLDivElement | null)[]>([])
 
   useEffect(() => { if (opened) { setQuery(''); setActive(0); setPicked(false) } }, [opened])
 
@@ -100,10 +100,14 @@ export function Picker({ opened, onClose, placeholder, items }: {
               return (
                 <UnstyledButton
                   key={it.key}
+                  component="div"
+                  role="button"
+                  tabIndex={0}
                   ref={(el) => { rows.current[i] = el }}
                   className="ck-space"
                   data-active={i === cur}
                   onClick={() => pick(it)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(it) } }}
                   onMouseMove={() => { if (i !== cur) setActive(i) }}
                   style={{ borderRadius: 8, padding: '7px 9px', width: '100%', background: i === cur ? 'var(--ck-active)' : 'transparent' }}
                 >

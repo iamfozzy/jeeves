@@ -1,8 +1,8 @@
 // Cases for src/ptyLink.ts (the terminal pane's connection, queue and dead-socket state
-// machine), run under a fake socket and fake timers. Bundled and run by ptyLink.test.mjs.
+// machine), run under a fake socket and fake timers. Bundled and run by cases.test.mjs.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createPtyLink, ACK_MS, CONNECT_MS, STALE_MS, MAX_QUEUE, type SocketLike } from '../src/ptyLink'
+import { createPtyLink, ACK_MS, CONNECT_MS, STALE_MS, STABLE_MS, MAX_QUEUE, type SocketLike } from '../src/ptyLink'
 
 // Fake clock + timers.
 let now = 0, nextId = 1
@@ -37,7 +37,7 @@ class FakeSocket implements SocketLike {
 function setup() {
   now = 0; timers.clear()
   const sockets: FakeSocket[] = []
-  const log = { opens: [] as boolean[], out: '' as string, exits: [] as number[], states: [] as string[] }
+  const log = { opens: [] as boolean[], out: '' as string, exits: [] as number[], states: [] as string[], reasons: [] as (string | undefined)[] }
   const link = createPtyLink({
     url: () => 'ws://x/pty?n=' + sockets.length,
     socket: (u) => { const s = new FakeSocket(u); sockets.push(s); return s },
@@ -47,7 +47,7 @@ function setup() {
     onOpen: (f) => log.opens.push(f),
     onOutput: (d) => { log.out += d },
     onExit: (c) => log.exits.push(c),
-    onState: (s) => log.states.push(s)
+    onState: (s, _c, r) => { log.states.push(s); log.reasons.push(r) }
   })
   link.start()
   const last = () => sockets[sockets.length - 1]
@@ -104,13 +104,13 @@ test('silence after input for ACK_MS: drop, reconnect at once, resend same n', (
   assert.deepEqual(re.slice(0, 2), sent, 'resent with the same sequence numbers')
   assert.equal(re[2].d, '!')
   assert.ok(re[2].n > sent[1].n)
-  // an echo acknowledges; no further reconnects
-  last().msg({ t: 'o', d: 'ls\r\n!' })
+  // the first pong confirms the resent frames, the second '!'; no further reconnects
+  last().msg({ t: 'o', d: 'ls\r\n!' }); last().msg({ t: 'pong' }); last().msg({ t: 'pong' })
   advance(ACK_MS * 5)
   assert.equal(sockets.length, 2)
 })
 
-test('input answered by any frame never reconnects (steady output and typing)', () => {
+test('input answered by pongs never reconnects (steady output and typing)', () => {
   const { link, sockets, last } = setup()
   last().open()
   for (let i = 0; i < 2000; i++) { // 200 s of 100 ms steps
@@ -124,13 +124,39 @@ test('input answered by any frame never reconnects (steady output and typing)', 
   link.input('secret')
   const pings = last().sent.filter((f) => f.t === 'ping').length
   assert.ok(pings > 0)
-  advance(200); last().msg({ t: 'pong' })
+  advance(200); last().msg({ t: 'pong' }); last().msg({ t: 'pong' }) // the last ping, then the one 'secret' needed
   advance(ACK_MS * 3)
   assert.equal(sockets.length, 1)
   // steady output with no input for well past STALE_MS
   for (let i = 0; i < 100; i++) { advance(1000); last().msg({ t: 'o', d: 'tick' }) }
   link.check()
   assert.equal(sockets.length, 1)
+})
+
+test('output is not an ack: only a pong confirms input, so a half-open socket resends it', () => {
+  const { link, sockets, last } = setup()
+  last().open()
+  link.input('ls')
+  const s1 = last()
+  s1.msg({ t: 'o', d: 'prompt$ ' }) // output the server sent before it read the input
+  advance(ACK_MS + 1) // then the socket goes half-open: no pong
+  assert.equal(sockets.length, 2, 'reconnected')
+  last().open()
+  assert.deepEqual(last().inputs(), s1.inputs(), 'the unconfirmed input is resent')
+})
+
+test('a pong confirms only the frames sent before its ping', () => {
+  const { link, sockets, last } = setup()
+  last().open()
+  link.input('a') // ping covers a
+  link.input('b') // sent while that ping is out
+  last().msg({ t: 'pong' })
+  const pings = last().sent.filter((f) => f.t === 'ping')
+  assert.equal(pings.length, 2, 'a second ping covers b')
+  advance(ACK_MS + 1)
+  assert.equal(sockets.length, 2)
+  last().open()
+  assert.deepEqual(last().inputs().map((f) => f.d), ['b'])
 })
 
 test('one ping per unanswered window, not per key', () => {
@@ -174,7 +200,7 @@ test('stale open socket (no hb for STALE_MS) is replaced', () => {
   assert.equal(sockets.length, 2)
 })
 
-test('ended: no reconnect; a keypress revives without sending that key', () => {
+test('ended: no reconnect; input is dropped; revive() starts a fresh session', () => {
   const { link, sockets, log, last } = setup()
   last().open(); last().msg({ t: 'o', d: 'bye' }); last().msg({ t: 'exit', code: 1 })
   assert.equal(link.state, 'ended')
@@ -183,7 +209,10 @@ test('ended: no reconnect; a keypress revives without sending that key', () => {
   advance(60000); link.check()
   assert.equal(sockets.length, 1)
   assert.equal(link.state, 'ended')
-  link.input('x') // the reviving key
+  link.input('\x1b[<0;1;1M') // a mouse report: no revive, not queued
+  assert.equal(sockets.length, 1)
+  assert.equal(link.state, 'ended')
+  link.revive()
   assert.equal(sockets.length, 2)
   assert.equal(link.state, 'reconnecting')
   link.input('y')
@@ -193,11 +222,11 @@ test('ended: no reconnect; a keypress revives without sending that key', () => {
   assert.deepEqual(last().inputs().map((f) => f.d), ['y'])
 })
 
-test('ended while the socket stays open: keypress replaces it', () => {
+test('ended while the socket stays open: revive() replaces it', () => {
   const { link, sockets, last } = setup()
   last().open(); last().msg({ t: 'exit', code: 0 })
   const s1 = last()
-  link.input('\r')
+  link.input('\r'); link.revive()
   assert.ok(s1.closed)
   assert.equal(sockets.length, 2)
   assert.equal(s1.inputs().length, 0)
@@ -218,6 +247,44 @@ test('backoff caps at 5 s', () => {
   assert.equal(sockets.length, 9)
 })
 
+test('accept-then-close backs off instead of retrying every second', () => {
+  const { sockets, last } = setup()
+  const gaps: number[] = []
+  for (let i = 0; i < 6; i++) {
+    last().open(); last().die()
+    const n = sockets.length, t0 = now
+    while (sockets.length === n) advance(100)
+    gaps.push(now - t0)
+  }
+  assert.deepEqual(gaps, [1000, 2000, 4000, 5000, 5000, 5000])
+})
+
+test('backoff restarts once a socket stayed open for STABLE_MS', () => {
+  const { sockets, last } = setup()
+  for (let i = 0; i < 3; i++) { last().open(); last().die(); advance(5000) }
+  last().open(); advance(STABLE_MS + 1); last().die()
+  const n = sockets.length
+  advance(1000)
+  assert.equal(sockets.length, n + 1)
+})
+
+test('fatal: failed with the reason, no retry, input dropped; revive() tries again', () => {
+  const { link, sockets, log, last } = setup()
+  link.input('q')
+  last().open()
+  last().msg({ t: 'o', d: '[cockpit: cwd not allowed]' })
+  last().msg({ t: 'fatal', reason: 'cwd not allowed' })
+  last().die()
+  assert.equal(link.state, 'failed')
+  assert.equal(log.reasons[log.reasons.length - 1], 'cwd not allowed')
+  advance(60000); link.check(); link.input('x')
+  assert.equal(sockets.length, 1)
+  link.revive()
+  assert.equal(sockets.length, 2)
+  last().open()
+  assert.equal(last().inputs().length, 0)
+})
+
 test('dispose stops everything', () => {
   const { link, sockets, last } = setup()
   last().open(); link.dispose()
@@ -226,4 +293,3 @@ test('dispose stops everything', () => {
   assert.equal(sockets.length, 1)
 })
 
-let fail = 0

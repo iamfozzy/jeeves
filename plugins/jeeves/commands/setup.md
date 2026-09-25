@@ -82,12 +82,11 @@ that differs from the defaults (e.g. `review scope: repo`). Then create it as §
   when it isn't `<dev-root>/<repo name>`; `project key` when it has Jira; plus any field the user
   set that differs from `defaults.md`. Frontmatter `reviewCommand` and `seedFiles` are inherited
   from the defaults (a seed file missing from a checkout is skipped) — set them only to differ.
-- **Under the cockpit** call `create_project({ id, repo, path?, baseBranch?, jiraKey?,
-  reviewCommand?, seedFiles? })` — it writes exactly this minimal shape and adds the project live —
-  then `write_state({ project: id, markdown })` with the `${CLAUDE_PLUGIN_ROOT}/templates/state.md`
-  header. **Headless**, write `project.md` from `${CLAUDE_PLUGIN_ROOT}/templates/project.template.md`
-  (dropping unset fields, adding any overrides by the defaults' bold label) and `state.md` from the
-  state template.
+- Write `<data-home>/projects/<id>/project.md` from
+  `${CLAUDE_PLUGIN_ROOT}/templates/project.template.md` (dropping unset fields, adding any overrides
+  by the defaults' bold label, and `reviewCommand` / `seedFiles` as frontmatter only when they
+  differ) and `state.md` from `${CLAUDE_PLUGIN_ROOT}/templates/state.md`. A running cockpit picks
+  the new project up on its own.
 - Never overwrite an existing `project.md` or `state.md` — those are live config and memory.
 
 ## 6. Offer the `jeeves` terminal command
@@ -104,8 +103,8 @@ especially the PATH note if `~/.local/bin` isn't on their `PATH`. (Windows: poin
 `/jeeves:cockpit`, or run the loop headless with `/jeeves:start` from a repo.
 
 ## Customising
-- **Rules** — the baseline is shipped and updates with the plugin. Your own extra/tightened rules go
-  in `<data-home>/loop-constraints.md`, appended on top. Point them there, never at the baseline.
+- **Rules** — their own extra or tightened rules go in `<data-home>/loop-constraints.md` (§1 step
+  2), never in the baseline.
 - **Shared behaviour** (Jira/QA fields, Confluence, base branches, seed files) lives in
   `defaults.md`; **one repo's differences** (review scope, a review policy, protected paths, an
   attribution rule) go in its `project.md`, overriding the defaults.

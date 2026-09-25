@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { memo, useEffect, useState } from 'react'
 import { ActionIcon, Button, Group, Menu, Stack, Text, TextInput, Tooltip } from '@mantine/core'
 import { IconBrandVscode, IconFolderOpen, IconLayoutSidebarRightCollapse, IconLayoutSidebarRightExpand, IconRobot, IconTerminal2 } from '@tabler/icons-react'
 import { TerminalPane } from './TerminalPane'
@@ -24,7 +24,7 @@ const cleanTitle = (t: string) => t.replace(/^[^\p{L}\p{N}]+/u, '').trim()
 const FILE_MANAGER = /Mac|iPhone|iPad/.test(navigator.platform) ? 'Finder'
   : /Win/.test(navigator.platform) ? 'Explorer' : 'file manager'
 
-export function SpaceView({
+export const SpaceView = memo(function SpaceView({
   space,
   spaceActive,
   panel = true,
@@ -161,12 +161,12 @@ export function SpaceView({
 
         <Group gap={2} px={6} wrap="nowrap" style={{ flex: 'none' }}>
           <Tooltip label="Open in VS Code" openDelay={400} withArrow>
-            <ActionIcon variant="subtle" color="gray" size="md" onClick={() => openFolder(space.cwd, 'editor')} aria-label="Open in VS Code">
+            <ActionIcon variant="subtle" color="gray" size="md" onClick={() => openFolder(space.cwd, 'editor').catch(() => {})} aria-label="Open in VS Code">
               <IconBrandVscode size={17} />
             </ActionIcon>
           </Tooltip>
           <Tooltip label={`Reveal in ${FILE_MANAGER}`} openDelay={400} withArrow>
-            <ActionIcon variant="subtle" color="gray" size="md" onClick={() => openFolder(space.cwd, 'files')} aria-label={`Reveal in ${FILE_MANAGER}`}>
+            <ActionIcon variant="subtle" color="gray" size="md" onClick={() => openFolder(space.cwd, 'files').catch(() => {})} aria-label={`Reveal in ${FILE_MANAGER}`}>
               <IconFolderOpen size={17} />
             </ActionIcon>
           </Tooltip>
@@ -195,7 +195,7 @@ export function SpaceView({
       </div>
     </div>
   )
-}
+})
 
 // Shown in a space with no tabs: Jeeves, in top hat and beard, delighted to have nothing
 // to do, dancing.

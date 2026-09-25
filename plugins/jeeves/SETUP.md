@@ -42,9 +42,9 @@ offers `--scan` and the `jeeves` terminal command.
   configs for the ones you pick: `all`, `1-5,9`, `none`, with inline corrections like `3=ABC`,
   `4=nojira`, `7 base=main`. Nothing is written until you answer.
 - **One** — `/jeeves:setup <name>` asks only for what the defaults and the checkout can't answer.
-- **From the cockpit** — Settings → Projects → **Add repos…** runs the scan in the orchestrator.
-  You can also ask Jeeves to add, change or drop a project; dropping one moves its folder to
-  `projects/.trash/` and never touches the checkout.
+- **From the cockpit** — Settings → Projects → **Add repos…** opens a Scratchpad Claude tab
+  running the scan. You can also ask Jeeves to add, change or drop a project; dropping one moves
+  its folder to `projects/.trash/` and never touches the checkout.
 
 A project's id is its repo name (`<owner>-<repo>` if that's taken). Setup never overwrites an
 existing `project.md` or `state.md`.
@@ -183,12 +183,13 @@ You audit one PR for security mistakes…
 |---|---|---|
 | `name` | The file name without `.md`: lowercase letters, digits and `-`, starting with a letter (2–41 characters). `worker` is taken by the loop; a built-in's name customises that built-in. | required |
 | `description` | One line: when to use it. The loop matches items against it. | required |
-| `tools` | Comma list from `Bash`, `Read`, `Edit`, `Write`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, `NotebookEdit`, `Task`. | every tool |
+| `tools` | Comma list from `Bash`, `Read`, `Edit`, `Write`, `Grep`, `Glob`, `Skill`, `Workflow`, `WebFetch`, `WebSearch`, `NotebookEdit`, `Task`. | every tool |
 | `model` | `inherit`, `claude-opus-5-5`, `claude-sonnet-5`, `claude-haiku-4-5`, `claude-fable-5-1` or `claude-opus-5`. | `inherit` — the worker model from `cockpit.json` |
 | `base` | Written by Settings on an override: the hash of the built-in it was customised from. | — |
 | body | The agent's system prompt. | required |
 
-A file named like a built-in (`story-worker`, `review-resolver`, `loop-verifier`) **overrides** it:
+A file named like a built-in (`planner`, `story-worker`, `reviewer`, `review-resolver`,
+`investigator`, `loop-verifier`) **overrides** it:
 cockpit dispatches of that agent run your version; headless (Task) dispatches still use the
 plugin's. Settings → Agents flags an override whose built-in has changed since (its hash no longer
 matches `base`) and shows the current built-in beside yours; saving your version again clears the

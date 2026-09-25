@@ -9,6 +9,11 @@ browser **cockpit**: a live dashboard on the right, real terminal spaces on the 
 Everything runs on your machine. The cockpit is loopback-only and token-gated; each teammate runs
 their own, nothing is shared over the network.
 
+Under the cockpit the loop's orchestrator has no shell and spawns no subagents: it reads status
+(PRs, checks, tickets, its own files) through typed cockpit tools and dispatches every piece of
+work — code, reviews, investigation — to a worker you can watch. Headless (`/jeeves:start` in a
+plain session) it has the full toolset, and the same rules hold by prompt alone.
+
 - **First run?** → [Getting started](#getting-started).
 - **Field reference** (`defaults.md`, `project.md`, `identity.md`, `cockpit.json`, env vars,
   `reminders.md`, `state.md`, `agents/`): [`SETUP.md`](SETUP.md).
@@ -127,8 +132,8 @@ Jeeves never merges, never posts a review until you pick its verdict, and never 
 
 - **Sidebar** — **Jeeves** (the orchestrator and dashboard), **Scratchpad** (terminals rooted at
   your home directory), then **Spaces** grouped by repo and **Agents** (dispatched workers). A repo appears
-  only while it has an open space or worker, or you've pinned it; pinned repos come first, then
-  the ones needing attention. Each space row shows its branch, with the count of uncommitted files
+  only while it has an open space or worker, or you've pinned it; pinned repos come first, then the rest in the order you opened them — the order never moves by
+  itself. Each space row shows its branch, with the count of uncommitted files
   on the right; its **?** card has the worktree folder and ahead/behind against its upstream.
 - **Open a space** — the repo row's **+**, or **+** on the Spaces header to pick a repo. Choose an
   existing or new branch, an open PR, or an existing worktree. A new branch is cut from the
@@ -163,7 +168,8 @@ The header's ⚙ opens five tabs. Field-by-field reference: [`SETUP.md`](SETUP.m
 
 - **Projects** — every configured repo, filterable. Open one to see each field tagged *set here*
   or *default* (inherited from Defaults), change or reset overrides, and view the items Jeeves is
-  tracking for it. **Add repos…** runs `/jeeves:setup --scan` in the orchestrator.
+  tracking for it. **Add repos…** opens a Claude tab in the Scratchpad running
+  `/jeeves:setup --scan`.
 - **Defaults** — your identity, and the shared defaults every project inherits: Jira, Confluence,
   GitHub review scope and base branches, review command and seed files.
 - **Agents** — the built-in agents (planner, story worker, reviewer, review resolver, investigator, verifier), each expandable to its

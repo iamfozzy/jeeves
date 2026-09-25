@@ -23,6 +23,7 @@ export function SpacePanel({ cwd, repoId, active }: { cwd: string; repoId?: stri
   const [changes, setChanges] = useState<Changes | null>(null)
   const [all, setAll] = useState<Changes | null>(null)
   const [pr, setPr] = useState<PrStatus | null>(null)
+  const [pollError, setPollError] = useState<string | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const [tab, setTab] = useState<Tab>('changes')
 
@@ -38,7 +39,9 @@ export function SpacePanel({ cwd, repoId, active }: { cwd: string; repoId?: stri
       inFlight = true
       try {
         const [c, p, a] = await Promise.all([getChanges(cwd), getPrStatus(cwd), base ? getChanges(cwd, base) : null])
-        if (!cancelled) { setChanges(c); setPr(p); if (a) setAll(a) }
+        if (!cancelled) { setChanges(c); setPr(p); if (a) setAll(a); setPollError(null) }
+      } catch (e) {
+        if (!cancelled) setPollError(e instanceof Error ? e.message : 'failed to load')
       } finally { inFlight = false }
     }
     poll()
@@ -61,7 +64,8 @@ export function SpacePanel({ cwd, repoId, active }: { cwd: string; repoId?: stri
 
   return (
     <div className="ck-sidepanel" style={{ width: 300, flex: 'none', height: '100%', overflowY: 'auto', background: 'var(--ck-surface)', borderLeft: '1px solid var(--ck-border)' }}>
-      {noGit ? <Box px="md" py="sm"><Text size="xs" c="dimmed">not a git worktree</Text></Box> : (
+      {noGit ? <Box px="md" py="sm"><Text size="xs" c="dimmed">not a git worktree</Text></Box>
+        : pollError && !changes ? <Box px="md" py="sm"><Text size="xs" c="red">{pollError}</Text></Box> : (
         <>
           <Tabs value={tab} onChange={(v) => v && setTab(v as Tab)} color="cockpit" className="ck-ptabs">
             <Tabs.List>

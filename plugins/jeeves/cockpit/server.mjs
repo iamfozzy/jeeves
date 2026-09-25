@@ -1,7 +1,7 @@
 import http from 'node:http'
 import os from 'node:os'
 import { readFile, writeFile, unlink } from 'node:fs/promises'
-import { existsSync, readFileSync, readdirSync, copyFileSync, mkdirSync, renameSync, statSync, unlinkSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, readdirSync, copyFileSync, mkdirSync, realpathSync, renameSync, statSync, unlinkSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, extname, normalize, basename, resolve, sep } from 'node:path'
 import { createRequire } from 'node:module'
@@ -12,6 +12,8 @@ import { WebSocketServer } from 'ws'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { z } from 'zod'
+import { gqlMutations } from './lib/graphql.mjs'
+import { loopStalled } from './lib/loop-health.mjs'
 
 // node-pty is a native CommonJS addon; load it through require so ESM interop
 // never trips on the prebuilt binary.
@@ -28,45 +30,72 @@ const SHELL = process.env.SHELL || (WIN ? 'powershell.exe' : 'bash')
 // the cwd allowlist includes NEUTRAL, would allow the entire home tree as a cwd.
 const NEUTRAL = process.env.JEEVES_HOME || join(os.homedir(), 'jeeves')
 const DIST = join(__dirname, 'dist')
+// Every PTY is a child of this process, so one stray error must never end it: log and run on.
+process.on('uncaughtException', (e) => console.error('cockpit: uncaught exception:', e))
+process.on('unhandledRejection', (e) => console.error('cockpit: unhandled rejection:', e))
 
 // ── Local access token ───────────────────────────────────────────────────────
 // The server is loopback-only, but a token still blocks any other local process
 // (or a browser tricked into POSTing to localhost) from driving PTYs. Taken from
 // $JEEVES_TOKEN, else persisted to .jeeves-token so restarts keep the same value
 // and an open browser tab stays valid. Settings → Cockpit can rotate the persisted
-// one. Sessions this process spawns (MCP config, lifecycle hooks) authenticate with
-// SESSION_TOKEN instead — per boot, never shown — so a rotation never cuts off the
-// running orchestrator or workers.
+// one. Sessions this process spawns never see it: each gets its own MCP token (minted
+// at spawn, see mintMcpToken), and their hooks and status line relay carry narrow
+// tokens that each authorise one endpoint. No token ever travels in argv: session
+// config goes in 0600 files under .jeeves-sessions/, tokens in the PTY environment.
 const TOKEN_FILE = join(__dirname, '.jeeves-token')
+// Every .jeeves-* file here holds a token, a session id or the user's layout: owner-only.
+const PRIVATE = 0o600
 let TOKEN = (() => {
   if (process.env.JEEVES_TOKEN) return process.env.JEEVES_TOKEN
   try { const t = readFileSync(TOKEN_FILE, 'utf8').trim(); if (t) return t } catch {}
   const t = randomBytes(24).toString('hex')
-  writeFile(TOKEN_FILE, t).catch(() => {})
+  try { atomicWrite(TOKEN_FILE, t, PRIVATE) } catch {}
   return t
 })()
-const SESSION_TOKEN = randomBytes(24).toString('hex')
-// Authorises only POST /api/usage: it rides in every launched session's environment
-// (the status line relay reads it), so it grants nothing else.
+// Authorise only POST /api/usage and POST /api/hook: they ride in every launched
+// session's environment (the status line relay and the lifecycle hook read them).
 const USAGE_TOKEN = randomBytes(24).toString('hex')
+const HOOK_TOKEN = randomBytes(24).toString('hex')
 const cockpitUrl = () => `http://localhost:${PORT}/?token=${TOKEN}`
-function tokenOk(provided) {
-  if (!provided) return false
-  const a = Buffer.from(String(provided))
-  return [TOKEN, SESSION_TOKEN].some((t) => { const b = Buffer.from(t); return a.length === b.length && timingSafeEqual(a, b) })
-}
-function authed(req, url) {
-  const h = req.headers['authorization'] || ''
-  const bearer = h.startsWith('Bearer ') ? h.slice(7) : null
-  return tokenOk(bearer || url.searchParams.get('token'))
-}
-// A fresh browser token, persisted to .jeeves-token; the old one stops working at once.
+const sameToken = (provided, t) => { const a = Buffer.from(String(provided ?? '')), b = Buffer.from(t); return a.length === b.length && timingSafeEqual(a, b) }
+const bearer = (req) => { const h = req.headers['authorization'] || ''; return h.startsWith('Bearer ') ? h.slice(7) : null }
+// The browser token, from the Authorization header or ?token= (a WebSocket can't set headers).
+const authed = (req, url) => sameToken(bearer(req) || url.searchParams.get('token'), TOKEN)
+// A fresh browser token, persisted to .jeeves-token; the old one stops working at once,
+// and every socket opened with it is closed.
 async function rotateToken() {
   if (process.env.JEEVES_TOKEN) return { error: 'the token is pinned by $JEEVES_TOKEN' }
   const t = randomBytes(24).toString('hex')
-  try { await writeFile(TOKEN_FILE, t) } catch (e) { return { error: 'write failed: ' + e.message } }
+  try { atomicWrite(TOKEN_FILE, t, PRIVATE) } catch (e) { return { error: 'write failed: ' + e.message } }
+  const old = TOKEN
   TOKEN = t
+  for (const ws of [...ptyWss.clients, ...eventsWss.clients]) if (ws.token === old) { try { ws.close() } catch {} }
+  for (const [id, m] of mcpTransports) if (m.token === old) { mcpTransports.delete(id); m.transport.close().catch(() => {}) }
   return { token: t }
+}
+
+// Write a file whole: a temp file beside it renamed over it, so a crash never leaves it
+// half-written. A symlink is written at its target, so the link survives. `mode` sets the
+// file's permissions; without it an existing file keeps its own.
+function atomicWrite(file, data, mode) {
+  const dest = existsSync(file) ? realpathSync(file) : file
+  if (mode == null) { try { mode = statSync(dest).mode & 0o777 } catch {} }
+  const tmp = join(dirname(dest), `.${basename(dest)}.jeeves-${process.pid}-${randomBytes(4).toString('hex')}`)
+  try {
+    writeFileSync(tmp, data, mode == null ? undefined : { mode })
+    if (mode != null) chmodSync(tmp, mode)
+    renameSync(tmp, dest)
+  } catch (e) { try { unlinkSync(tmp) } catch {} throw e }
+}
+// One read→modify→write at a time per file: fn runs once every earlier one on `file` settled.
+const fileLocks = new Map()
+function withLock(file, fn) {
+  const run = (fileLocks.get(file) || Promise.resolve()).then(fn, fn)
+  const tail = run.then(() => {}, () => {})
+  fileLocks.set(file, tail)
+  tail.then(() => { if (fileLocks.get(file) === tail) fileLocks.delete(file) })
+  return run
 }
 
 // ── Cockpit settings: <data-home>/cockpit.json ───────────────────────────────
@@ -150,7 +179,8 @@ function cockpitView() {
   }
 }
 // Apply { set: {key: value}, unset: [key] } to cockpit.json; unset = back to the default.
-async function writeCockpit({ set = {}, unset = [] } = {}) {
+function writeCockpit(change) { return withLock(COCKPIT_FILE, () => writeCockpitNow(change)) }
+async function writeCockpitNow({ set = {}, unset = [] } = {}) {
   if (typeof set !== 'object' || set === null || Array.isArray(set) || !Array.isArray(unset)) return { error: 'set must be an object, unset an array' }
   const next = { ...cockpitFile }
   for (const k of unset) { if (!COCKPIT_SPEC[k]) return { error: 'unknown setting: ' + k }; delete next[k] }
@@ -160,7 +190,7 @@ async function writeCockpit({ set = {}, unset = [] } = {}) {
     if (pinnedValid(k)) return { error: `${k} is pinned by $${pinnedValid(k)}` }
     next[k] = c.value
   }
-  try { await writeFile(COCKPIT_FILE, JSON.stringify(next, null, 2) + '\n') } catch (e) { return { error: 'write failed: ' + e.message } }
+  try { atomicWrite(COCKPIT_FILE, JSON.stringify(next, null, 2) + '\n') } catch (e) { return { error: 'write failed: ' + e.message } }
   loadCockpit()
   lastContext = { ...lastContext, rotateAt: cfg('rotatePct') }
   pushContext()
@@ -180,7 +210,7 @@ let ORCH_SESSION_ID = process.env.JEEVES_ORCH_SESSION_ID || (() => {
   try { const id = readFileSync(ORCH_SESSION_FILE, 'utf8').trim(); if (/^[0-9a-f-]{36}$/i.test(id)) return id } catch {}
   return randomUUID()
 })()
-function setOrchSessionId(id) { ORCH_SESSION_ID = id; try { writeFileSync(ORCH_SESSION_FILE, id) } catch {} }
+function setOrchSessionId(id) { ORCH_SESSION_ID = id; try { atomicWrite(ORCH_SESSION_FILE, id, PRIVATE) } catch {} }
 setOrchSessionId(ORCH_SESSION_ID)
 // Pin every "opus" the loop asks for — the bare `opus` alias or any versioned opus
 // id — to the configured worker Opus (Opus 5.5 unless the worker model is set to
@@ -192,15 +222,35 @@ const pinOpus = (m) => OPUS_RE.test(String(m)) ? workerOpus() : String(m)
 // A stable name so workers can message the orchestrator cross-session.
 const ORCH_NAME = process.env.JEEVES_ORCH_NAME || 'jeeves-orchestrator'
 const CTX_WINDOW = +(process.env.JEEVES_CTX_WINDOW || 1000000) // orchestrator context window for the ctx% badge (default 1M)
-// MCP configs. The orchestrator's is a file with the full tool set. Workers and
-// claude tabs get theirs inline, carrying their own sid so the server knows which
-// session is calling: /mcp?role=worker (report + the child-tab tools) or
-// /mcp?role=tab (the child-tab tools only).
-const MCP_CONFIG_FILE = join(__dirname, '.jeeves-mcp.json')
-const mcpConfig = (role, caller) => JSON.stringify({
-  mcpServers: { cockpit: { type: 'http', url: `http://${HOST}:${PORT}/mcp${role ? `?role=${role}&sid=${encodeURIComponent(caller)}` : ''}`, headers: { Authorization: `Bearer ${SESSION_TOKEN}` } } }
+// Per-session files: each launched claude's --mcp-config and --settings, passed by
+// path so no token is ever on a command line. Named by the session's id.
+const SESSIONS_DIR = join(__dirname, '.jeeves-sessions')
+const sessionFile = (id, ext) => join(SESSIONS_DIR, String(id).replace(/[^A-Za-z0-9_.-]/g, '+') + ext)
+function writeSessionFile(id, ext, obj) {
+  mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 })
+  const f = sessionFile(id, ext)
+  atomicWrite(f, JSON.stringify(obj, null, 2), PRIVATE)
+  return f
+}
+// MCP tokens: one per launched session, minted at spawn and mapped to what it may call —
+// role null (the orchestrator: every tool), 'worker' (report + the child-tab tools) or 'tab'
+// (the child-tab tools only) — and the caller's sid. /mcp takes role and caller from the
+// token alone. A new token for a caller revokes its last one.
+const mcpTokens = new Map() // token → { role, caller }
+function mintMcpToken(role, caller) {
+  for (const [t, v] of mcpTokens) if (v.caller === caller) revokeMcpToken(t)
+  const t = randomBytes(24).toString('hex')
+  mcpTokens.set(t, { role, caller })
+  return t
+}
+function revokeMcpToken(t) {
+  mcpTokens.delete(t)
+  for (const [id, m] of mcpTransports) if (m.token === t) { mcpTransports.delete(id); m.transport.close().catch(() => {}) }
+}
+// The session's --mcp-config file, with a fresh token for it.
+const mcpConfig = (role, caller) => writeSessionFile(caller, '.mcp.json', {
+  mcpServers: { cockpit: { type: 'http', url: `http://${HOST}:${PORT}/mcp`, headers: { Authorization: `Bearer ${mintMcpToken(role, caller)}` } } }
 })
-try { writeFileSync(MCP_CONFIG_FILE, JSON.stringify(JSON.parse(mcpConfig()), null, 2)) } catch {}
 
 // Bus state: the last surface the orchestrator painted and the dispatched worker
 // spaces (the durable store — each worker's report lives on its record). `inbox`
@@ -216,22 +266,24 @@ const workerList = () => [...bus.workers.values()]
 // Shell/codex tabs have nothing to resume — they respawn fresh.
 const WORKERS_FILE = join(__dirname, '.jeeves-workers.json')
 const TABS_FILE = join(__dirname, '.jeeves-tabs.json')
-function saveWorkers() { try { writeFileSync(WORKERS_FILE, JSON.stringify(workerList())) } catch {} }
+function saveWorkers() { try { atomicWrite(WORKERS_FILE, JSON.stringify(workerList()), PRIVATE) } catch {} }
 // tab sid ("space:tab") → { sessionId, cwd }, so a claude tab resumes after a restart.
 const tabSessions = new Map()
-function saveTabs() { try { writeFileSync(TABS_FILE, JSON.stringify([...tabSessions])) } catch {} }
+function saveTabs() { try { atomicWrite(TABS_FILE, JSON.stringify([...tabSessions]), PRIVATE) } catch {} }
 // The user's layout — open spaces and their tabs, the Scratchpad, pinned and recent
 // repos. The server owns it, not the browser, so every origin that serves the UI
 // (vite in dev, the built bundle here) shows the same spaces.
 const LAYOUT_FILE = join(__dirname, '.jeeves-layout.json')
 let layout = null
-function saveLayout(next) { layout = next; try { writeFileSync(LAYOUT_FILE, JSON.stringify(next)) } catch {} }
+function saveLayout(next) { layout = next; try { atomicWrite(LAYOUT_FILE, JSON.stringify(next), PRIVATE) } catch {} }
 
 // The transcript JSONL claude writes for a session run in `cwd` — its existence
-// is how we tell "resume this" from "start fresh".
+// is how we tell "resume this" from "start fresh". claude names the folder after its
+// real cwd, symlinks followed; one under the path as typed is still found.
 function transcriptPathFor(cwd, sessionId) {
-  const enc = normalize(cwd).replace(/[^A-Za-z0-9]/g, '-')
-  return join(os.homedir(), '.claude', 'projects', enc, sessionId + '.jsonl')
+  const at = (dir) => join(os.homedir(), '.claude', 'projects', normalize(dir).replace(/[^A-Za-z0-9]/g, '-'), sessionId + '.jsonl')
+  const real = at(realOr(cwd)), typed = at(cwd)
+  return existsSync(real) || !existsSync(typed) ? real : typed
 }
 
 // A folder inside a worktree that never dirties it: created with a `*` .gitignore.
@@ -243,9 +295,17 @@ function ignoredDir(dir) {
 
 // Browser push channel (/events WebSocket).
 const eventClients = new Set()
+// A socket whose client has stopped reading (over this much queued) is dropped; the
+// browser reconnects and is primed afresh, rather than the server buffering without end.
+const WS_BACKLOG = 4 * 1024 * 1024
+function sendTo(ws, s) {
+  if (ws.readyState !== 1) return
+  if (ws.bufferedAmount > WS_BACKLOG) { try { ws.terminate() } catch {} return }
+  try { ws.send(s) } catch {}
+}
 function broadcast(msg) {
   const s = JSON.stringify(msg)
-  for (const ws of eventClients) if (ws.readyState === 1) { try { ws.send(s) } catch {} }
+  for (const ws of eventClients) sendTo(ws, s)
 }
 const hasBrowser = () => { for (const ws of eventClients) if (ws.readyState === 1) return true; return false }
 const pushSurface = () => broadcast({ t: 'surface', payload: bus.surface })
@@ -253,9 +313,11 @@ const pushSpaces = () => broadcast({ t: 'spaces', spaces: workerList() })
 // The loop's heartbeat: when it last ticked (its per-tick inbox / tick_snapshot call) and
 // how often it should, so the UI can flag a stalled loop.
 let lastTickAt = 0
+const startedAt = Date.now() // lastTickAt below this = the loop hasn't ticked since the server started
 // The account's 5-hour and 7-day rate limits, from the status line relay (POST /api/usage).
 let usage = null
-const orchCtx = (c = lastContext) => ({ ...c, lastTickAt, tickEveryMs: tickEveryMs(), usage })
+const orchCtx = (c = lastContext) => ({ ...c, lastTickAt, startedAt, tickEveryMs: tickEveryMs(), usage, stalled: orchStalled() })
+const orchStalled = () => loopStalled({ running: sessions.has('orch:main'), status: orchStatus, idleSince: orchIdleSince, inputAt: orchInputAt, lastTickAt, startedAt, every: tickEveryMs() })
 const pushContext = () => broadcast({ t: 'context', ctx: orchCtx() })
 function markTick() { lastTickAt = Date.now(); pushContext() }
 // Lifecycle status of user-opened claude tabs, keyed by their sid (`spaceId:tabId`).
@@ -265,18 +327,47 @@ const sessionStatus = new Map()
 // launch. { parent, kind, cwd, prompt, result, sid } — sid is bound on first
 // attach. In memory: after a server restart a child is an ordinary tab.
 const tabLinks = new Map()
-// Shell tabs opened with a `command` (open_space / add_tab), keyed by the tab's id:
-// the command is typed into the shell once it first prints, on the tab's first spawn.
-const pendingRuns = new Map()
+// What a new tab starts on, keyed by its tab id and consumed by its first spawn:
+// { kind: 'shell', command } — typed into the shell once it first prints (open_space /
+// add_tab), or { kind: 'claude', prompt } — the session's first message (add_tab,
+// POST /api/tab-prompt). Each has `at`, and is dropped after PENDING_LAUNCH_MS unconsumed.
+const pendingLaunches = new Map()
+const PENDING_LAUNCH_MS = 10 * 60e3
+const MAX_TAB_PROMPT = 4000
+const TAB_ID = /^[a-z0-9]{4,16}$/
+// Tabs the orchestrator opened (open_space's first tab, add_tab), by tabRef: the only ones
+// close_tab closes, and what inbox lists each tick so none is forgotten across a /compact or
+// restart. { tabRef, space: 'scratch' | spaceRef, kind, prompt?, command?, openedAt }.
+// Persisted; an entry goes on close_tab, when the user closes the tab (DELETE /api/session),
+// or once a saved layout no longer has it (after ORCH_TAB_GRACE_MS, so a layout saved
+// before the browser added the tab never drops it).
+const ORCH_TABS_FILE = join(__dirname, '.jeeves-orch-tabs.json')
+const ORCH_TAB_GRACE_MS = 60e3
+const orchTabs = new Map()
+const saveOrchTabs = () => { try { atomicWrite(ORCH_TABS_FILE, JSON.stringify([...orchTabs.values()]), PRIVATE) } catch {} }
+function addOrchTab(rec) { orchTabs.set(rec.tabRef, { ...rec, openedAt: Date.now() }); saveOrchTabs() }
+function dropOrchTab(tabRef) { if (orchTabs.delete(tabRef)) saveOrchTabs() }
+// An orchestrator tab as inbox lists it, with its session's hook status.
+function orchTabView(t) {
+  const sid = [...sessions.keys(), ...sessionStatus.keys()].find((k) => k.endsWith(':' + t.tabRef))
+  const status = (sid && sessionStatus.get(sid)) || (sid && sessions.has(sid) ? 'running' : 'not started')
+  return { tabRef: t.tabRef, space: t.space, kind: t.kind, ...(t.prompt ? { prompt: t.prompt } : {}), ...(t.command ? { command: t.command } : {}), openedAt: t.openedAt, status }
+}
+// The guard never sees these commands (they run in the user's tab, not the orchestrator's
+// Bash). A package manager or runner there is the intended use — a dev server or build for
+// the user to watch — so it runs, and guard.log records it as run for the user.
+const RUNNERS = new Set(['yarn', 'npm', 'pnpm', 'npx', 'bun', 'make'])
+function logUserRun(tool, command) {
+  const firsts = String(command).split(/&&|\|\||[;|&\n]/).map((c) => basename(c.trim().split(/\s+/)[0] || ''))
+  if (!firsts.some((w) => RUNNERS.has(w))) return
+  try { appendFileSync(join(NEUTRAL, 'guard.log'), JSON.stringify({ at: new Date().toISOString(), tool: 'mcp__cockpit__' + tool, what: String(command).slice(0, 300), why: 'ran for the user', allowed: true }) + '\n') } catch {}
+}
 const pushSessionStatus = (sid, status) => broadcast({ t: 'sessionStatus', sid, status })
 // Project config changed (created / updated / deleted) — tell the UI to refetch.
 const pushConfig = () => broadcast({ t: 'config' })
 
 // Orchestrator context usage, read from its transcript JSONL.
-function orchTranscriptPath() {
-  const enc = NEUTRAL.replace(/[^A-Za-z0-9]/g, '-')
-  return join(os.homedir(), '.claude', 'projects', enc, ORCH_SESSION_ID + '.jsonl')
-}
+const orchTranscriptPath = () => transcriptPathFor(NEUTRAL, ORCH_SESSION_ID)
 function tailBytes(path, n = 65536) {
   let fd
   try {
@@ -310,7 +401,8 @@ function readOrchContext() {
 }
 
 // ── Repo discovery (from the Jeeves data home) ───────────────────────────────
-function expandHome(p) { return p && p.startsWith('~') ? join(os.homedir(), p.slice(1)) : p }
+// `~` and `~/…` are the home dir; `~user` is left as typed.
+function expandHome(p) { return p && (p === '~' || /^~[\\/]/.test(p)) ? join(os.homedir(), p.slice(1)) : p }
 
 // ── Config files: defaults.md, identity.md, projects/<id>/project.md ─────────
 // Two kinds of setting live in them. Frontmatter keys (a leading `---` block of
@@ -393,7 +485,7 @@ const CONFIG_FIELDS = {
     F('pushNotifications', 'push notifications', 'text', 'Notifications'), F('notifyReminders', 'notify reminders', 'text', 'Notifications'),
     F('notifyWorkerFinished', 'notify worker finished', 'text', 'Notifications'), F('notifyReviewReady', 'notify review ready', 'text', 'Notifications')
   ],
-  identity: [F('ghLogin', 'gh login'), F('jiraEmail', 'Jira email'), F('displayName', 'display name'), F('devRoot', 'dev root')],
+  identity: [F('ghLogin', 'gh login'), F('jiraEmail', 'Jira email'), F('displayName', 'display name'), F('devRoot', 'dev root'), F('confluencePlansFolderId', 'confluence plans folder id')],
   project: [
     F('baseBranch', 'base branch', 'text', 'Identity'), F('jiraKey', 'project key', 'text', 'Jira'),
     F('reviewScope', 'review scope', 'text', 'GitHub'), FM('reviewCommand'), FM('seedFiles', 'list')
@@ -406,6 +498,8 @@ const CHOICES = {
   reviewScope: ['mine', 'repo'], dailySummary: ON_OFF,
   pushNotifications: ON_OFF, notifyReminders: ON_OFF, notifyWorkerFinished: ON_OFF, notifyReviewReady: ON_OFF
 }
+// Branch names become git arguments: one starting with - would read as an option.
+const BRANCH_KEYS = new Set(['baseBranch', 'baseBranches'])
 // Shape checks for free-text values: an error message, or null when the value is fine.
 const HHMM = '([01]\\d|2[0-3]):[0-5]\\d'
 const seconds = (v) => (/^\d+$/.test(v) && +v >= 30 && +v <= 86400 ? null : 'whole seconds, 30–86400')
@@ -587,6 +681,7 @@ function normValue(f, v) {
   const items = f.kind === 'list' ? (Array.isArray(v) ? v : splitList(v)).map((s) => String(s).trim()).filter(Boolean) : [String(v).trim()]
   for (const s of items) {
     if (/[\r\n`]/.test(s) || (f.fm && f.kind === 'list' && s.includes(','))) return { error: `invalid value for ${f.key}` }
+    if (BRANCH_KEYS.has(f.key) && s.startsWith('-')) return { error: `${f.key}: a branch name must not start with -` }
     if (s.includes('<')) return { error: `${f.key}: <…> is a placeholder — clear the field instead` }
   }
   if (f.kind === 'list') return items.length ? items : null
@@ -601,7 +696,11 @@ function normValue(f, v) {
 // project, a value equal to the inherited default is written as unset, so
 // project.md only ever holds real overrides. Refreshes the live REPOS entries the
 // file feeds and tells the UI to refetch.
-async function writeConfig({ file, project, set = {}, unset = [] } = {}) {
+function writeConfig(change = {}) {
+  const f = change?.file === 'project' ? projectFile(String(change.project)) : change?.file === 'identity' ? IDENTITY_FILE : DEFAULTS_FILE
+  return withLock(f, () => writeConfigNow(change))
+}
+async function writeConfigNow({ file, project, set = {}, unset = [] } = {}) {
   const fields = CONFIG_FIELDS[file]
   if (!fields) return { error: 'file must be defaults, identity or project' }
   if (typeof set !== 'object' || set === null || Array.isArray(set) || !Array.isArray(unset)) return { error: 'set must be an object, unset an array' }
@@ -626,7 +725,7 @@ async function writeConfig({ file, project, set = {}, unset = [] } = {}) {
     if (v != null && file === 'project' && JSON.stringify(v) === JSON.stringify(readField(dmd, f))) v = null
     md = f.fm ? writeFrontmatter(md, { [f.key]: v == null ? null : [v].flat().join(', ') }) : setMdField(md, f, v)
   }
-  try { await writeFile(path, md) } catch (e) { return { error: 'write failed: ' + e.message } }
+  try { atomicWrite(path, md) } catch (e) { return { error: 'write failed: ' + e.message } }
   // defaults.md and identity.md (dev root) feed every project; project.md only its own.
   const devRoot = devRootPath(), defaults = readDefaults()
   for (const r of REPOS) {
@@ -665,7 +764,8 @@ const remindersView = () => ({ reminders: parseReminders(readMd(REMINDERS_FILE))
 const pushReminders = () => broadcast({ t: 'reminders', ...remindersView() })
 watchFile(REMINDERS_FILE, { interval: 2000 }, pushReminders).unref()
 // { op: 'add', what, due } | { op: 'done' | 'delete', id } | { op: 'snooze', id, by: '1h' | '1d' }
-async function editReminders({ op, id, what, due, by } = {}) {
+function editReminders(change) { return withLock(REMINDERS_FILE, () => editRemindersNow(change)) }
+async function editRemindersNow({ op, id, what, due, by } = {}) {
   const raw = readMd(REMINDERS_FILE), md = raw.trim() ? raw : REMINDERS_HEADER
   const lines = md.split('\n')
   let out
@@ -693,7 +793,7 @@ async function editReminders({ op, id, what, due, by } = {}) {
     } else return { error: 'op must be add, done, delete or snooze' }
     out = lines.join('\n')
   }
-  try { await writeFile(REMINDERS_FILE, out) } catch (e) { return { error: 'write failed: ' + e.message } }
+  try { atomicWrite(REMINDERS_FILE, out) } catch (e) { return { error: 'write failed: ' + e.message } }
   return { ok: true }
 }
 
@@ -715,7 +815,7 @@ function settingsView() {
 const BUILTIN_AGENTS_DIR = join(__dirname, '..', 'agents')
 const AGENTS_DIR = join(NEUTRAL, 'agents')
 const AGENT_NAME = /^[a-z][a-z0-9-]{1,40}$/
-const AGENT_TOOLS = ['Bash', 'Read', 'Edit', 'Write', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Task']
+const AGENT_TOOLS = ['Bash', 'Read', 'Edit', 'Write', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Task', 'Skill', 'Workflow']
 const AGENT_MODELS = ['inherit', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-haiku-4-5', 'claude-fable-5-1', 'claude-opus-5']
 // The label a dispatch with no agent runs under, so no agent may take it.
 const DISPATCH_LABELS = ['worker']
@@ -783,7 +883,7 @@ async function editAgents({ op, agent, name, isNew } = {}) {
   const md = writeFrontmatter(prompt.trim() + '\n', {
     name: n, description: description.trim(), tools: [...new Set(tools)].join(', '), model, base: builtin?.hash
   })
-  try { mkdirSync(AGENTS_DIR, { recursive: true }); await writeFile(file, md) } catch (e) { return { error: 'write failed: ' + e.message } }
+  try { mkdirSync(AGENTS_DIR, { recursive: true }); atomicWrite(file, md) } catch (e) { return { error: 'write failed: ' + e.message } }
   return { ok: true }
 }
 // A dispatched session runs as `a`, defined inline so its tool list keeps the bus tools
@@ -801,6 +901,16 @@ const workerModelFor = (a, model) => (a && a.kind !== 'builtin' && a.model !== '
 
 const REPOS = discoverRepos()
 const worktreeBase = (repo) => repo.path + '-worktrees'
+// A project added or removed by writing projects/<id>/project.md directly (setup, a hand
+// edit) shows up without a restart: re-read on each /api/config, each tick_snapshot and
+// every 15 s, and the UI told when the index changed.
+function rescanRepos() {
+  const was = JSON.stringify(REPOS)
+  REPOS.splice(0, REPOS.length, ...discoverRepos())
+  for (const r of REPOS) addRepoRoots(r)
+  if (JSON.stringify(REPOS) !== was) pushConfig()
+}
+setInterval(rescanRepos, 15e3).unref()
 // The Scratchpad space is rooted at the user's home dir (their request: a general
 // terminal area). This deliberately widens the cwd allowlist to the whole home
 // tree — acceptable because the server is loopback-only and token-gated, and the
@@ -814,18 +924,24 @@ const dynRoots = new Set()
 // A project created at runtime isn't in the static ROOTS, so allow its checkout
 // and worktree dir via dynRoots (the same set git-discovered worktrees use).
 const addRepoRoots = (r) => { dynRoots.add(normalize(r.path)); dynRoots.add(normalize(worktreeBase(r))) }
-const inRoots = (list, n) => { for (const root of list) if (n === root || n.startsWith(root + sep)) return true; return false }
+const fold = WIN ? (s) => s.toLowerCase() : (s) => s // Windows paths compare case-insensitively
+const inRoots = (list, n) => { n = fold(n); for (const r of list) { const root = fold(r); if (n === root || n.startsWith(root + sep)) return true } return false }
 function allowedCwd(cwd) {
   const n = normalize(cwd)
   return inRoots(ROOTS, n) || inRoots(dynRoots, n)
 }
-// A folder space's directory: a typed path (~ expanded) that exists and is inside the
-// allowed roots, or { error }.
+const realOr = (p) => { try { return realpathSync(p) } catch { return normalize(p) } }
+// One folder, however it was spelled (symlinks followed; case-insensitive on Windows).
+const samePath = (a, b) => fold(realOr(a)) === fold(realOr(b))
+// A folder space's directory: a typed path (~ expanded; relative to the scratch root) that
+// exists and whose real path, symlinks followed, is inside the allowed roots, or { error }.
 function folderFor(raw) {
-  const p = resolve(expandHome(String(raw || '').trim()) || SCRATCH_ROOT)
+  const typed = String(raw || '').trim()
+  if (/^~[^\\/]/.test(typed)) return { error: '~user paths are not supported: ' + typed }
+  const p = resolve(SCRATCH_ROOT, expandHome(typed) || '.')
   let st; try { st = statSync(p) } catch {}
   if (!st?.isDirectory()) return { error: 'not a folder: ' + p }
-  if (!allowedCwd(p)) return { error: `outside the folders the cockpit may open (${SCRATCH_ROOT})` }
+  if (!inRoots([...ROOTS, ...dynRoots].map(realOr), realOr(p))) return { error: `outside the folders the cockpit may open (${SCRATCH_ROOT})` }
   return { path: p, name: basename(p) || p }
 }
 // The folder browser: a folder's subfolders (dot-folders left out) and its parent, when
@@ -863,7 +979,8 @@ async function listWorktrees(repo) {
     else if (line.startsWith('branch ') && cur) cur.branch = line.slice(7).replace('refs/heads/', '').trim()
     else if (line.startsWith('detached') && cur) cur.branch = '(detached)'
   }
-  return items.map((w) => ({ ...w, isMain: normalize(w.path) === normalize(repo.path) }))
+  // git lists real paths; the configured one may run through a symlink (macOS /var → /private/var).
+  return items.map((w) => ({ ...w, isMain: samePath(w.path, repo.path) }))
 }
 
 async function refreshWorktreeRoots() {
@@ -974,9 +1091,11 @@ function tickQuery(login, searches, after = {}) {
 }
 
 // `gh api graphql` → { data } or { error }. A GraphQL error alongside partial data is an error.
-function ghGraphql(query, timeout = 30000) {
+// `vars` are the query's variables: numbers typed (-F), everything else raw strings (-f).
+function ghGraphql(query, vars = {}, timeout = 30000) {
+  const varArgs = Object.entries(vars).flatMap(([k, v]) => [typeof v === 'number' ? '-F' : '-f', `${k}=${v}`])
   return new Promise((res) => {
-    execFile('gh', ['api', 'graphql', '-f', `query=${query}`], { timeout, maxBuffer: 32 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+    execFile('gh', ['api', 'graphql', '-f', `query=${query}`, ...varArgs], { timeout, maxBuffer: 32 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
       let body = null
       try { body = JSON.parse(stdout) } catch {}
       const gql = body?.errors?.length ? body.errors.map((e) => e.message).join('; ') : null
@@ -986,6 +1105,124 @@ function ghGraphql(query, timeout = 30000) {
       res({ data: body.data })
     })
   })
+}
+
+// ── GitHub for the orchestrator, which has no shell (github_read / github_write) ──
+// Every call is gh with an argv built here — never a shell — so no caller value may start
+// with - (it would read as an option), and output past GH_CAP characters is cut.
+const GH_CAP = 20000
+const GH_REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+const GH_PR_FIELDS = 'number,title,state,isDraft,author,headRefName,baseRefName,headRefOid,mergedAt,closedAt,mergeable,mergeStateStatus,statusCheckRollup,reviews,latestReviews,reviewRequests,body,url'
+const GH_THREADS_Q = 'query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved path line comments(first:100){nodes{author{login} body}}}}}}}'
+const GH_BRANCHES_Q = 'query($owner:String!,$name:String!,$q:String!){repository(owner:$owner,name:$name){refs(refPrefix:"refs/heads/",query:$q,first:100){nodes{name target{oid}}}}}'
+// The shaped kinds: gh's --jq turns each item into one line of JSON.
+const GH_SHAPE = {
+  commits: '.[] | {sha, author: (.author.login // .commit.author.name), subject: (.commit.message | split("\n")[0]), merge: ((.parents | length) > 1)}',
+  threads: '.data.repository.pullRequest.reviewThreads.nodes[] | {id, isResolved, path, line, comments: [.comments.nodes[] | {author: .author.login, body}]}',
+  branches: '.data.repository.refs.nodes[] | {name, oid: .target.oid}'
+}
+function gh(args, timeout = 30000) {
+  return new Promise((res) => {
+    execFile('gh', args, { timeout, maxBuffer: 32 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+      res({ ok: !err, out: stdout || '', err: err?.code === 'ENOENT' ? 'gh not found on PATH' : err?.killed ? `gh timed out after ${timeout / 1000}s` : lastLine(stderr || err?.message || '') })
+    })
+  })
+}
+// A tool result's text: whole, or its first GH_CAP characters as { text, total, truncated }.
+function capped(value) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value)
+  return text.length <= GH_CAP ? text : JSON.stringify({ text: text.slice(0, GH_CAP), total: text.length, truncated: true })
+}
+const dashed = (a) => Object.entries(a).find(([, v]) => typeof v === 'string' && v.trim().startsWith('-'))
+// github_read → { text } (the tool's result) or { error }.
+async function githubRead(a) {
+  const { kind, repo, query, head, state, jq } = a
+  const bad = dashed(a)
+  if (bad) return { error: `${bad[0]} must not start with -` }
+  if ((!['search', 'graphql'].includes(kind) || repo != null) && !GH_REPO.test(repo || '')) return { error: 'repo must be owner/name' }
+  const num = a.number == null ? '' : String(a.number).replace(/^#/, '').trim()
+  if (['pr', 'checks', 'run', 'commits', 'threads'].includes(kind) && !/^\d+$/.test(num)) return { error: `kind ${kind} needs a number` }
+  if (['search', 'branches', 'graphql'].includes(kind) && !String(query || '').trim()) return { error: `kind ${kind} needs a query` }
+  if (jq != null && GH_SHAPE[kind]) return { error: `jq isn't taken for ${kind}, which returns a fixed shape` }
+  const [owner, name] = String(repo || '').split('/')
+  const limit = String(Math.min(Math.max(parseInt(a.limit, 10) || 30, 1), 100))
+  const jqArgs = jq != null ? ['--jq', jq] : []
+  const on = (flag, v) => (v != null && v !== '' ? [flag, String(v)] : [])
+  let args
+  if (kind === 'pr') args = ['pr', 'view', num, '--repo', repo, '--json', GH_PR_FIELDS]
+  else if (kind === 'checks') args = ['pr', 'checks', num, '--repo', repo, '--json', 'name,state,bucket,workflow,link,startedAt,completedAt']
+  else if (kind === 'prs') args = ['pr', 'list', '--repo', repo, '--json', 'number,title,state,isDraft,author,headRefName,baseRefName,url,updatedAt', '--limit', limit, ...on('--head', head), ...on('--state', state), ...on('--search', query)]
+  else if (kind === 'search') args = ['search', 'prs', '--json', 'number,title,state,isDraft,author,repository,url,updatedAt', '--limit', limit, ...on('--repo', repo), ...on('--state', state), ...jqArgs, '--', ...String(query).split(/\s+/).filter(Boolean)]
+  else if (kind === 'runs') args = ['run', 'list', '--repo', repo, '--json', 'databaseId,name,displayTitle,workflowName,status,conclusion,headBranch,headSha,event,createdAt,url', '--limit', limit, ...on('--branch', head)]
+  else if (kind === 'run') args = ['run', 'view', num, '--repo', repo, '--json', 'status,conclusion,jobs']
+  else if (kind === 'commits') args = ['api', `repos/${owner}/${name}/pulls/${num}/commits`, '--paginate', '--jq', GH_SHAPE.commits]
+  else if (kind === 'threads') args = ['api', 'graphql', '--paginate', '-f', `query=${GH_THREADS_Q}`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-F', `number=${num}`, '--jq', GH_SHAPE.threads]
+  else if (kind === 'branches') args = ['api', 'graphql', '-f', `query=${GH_BRANCHES_Q}`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-f', `q=${query}`, '--jq', GH_SHAPE.branches]
+  else if (kind === 'graphql') {
+    const writes = gqlMutations(query)
+    if (!writes) return { error: 'that GraphQL document couldn\'t be parsed' }
+    if (writes.length) return { error: `refused: github_read runs queries only, and this document has a mutation (${writes.join(', ')})` }
+    args = ['api', 'graphql', '-f', `query=${query}`]
+  } else return { error: 'unknown kind: ' + kind }
+  if (kind !== 'search' && !GH_SHAPE[kind]) args.push(...jqArgs)
+  const r = await gh(args)
+  // gh exits non-zero with a usable answer too (pr checks while any is pending or failing;
+  // a GraphQL error body), so the output wins whenever there is some.
+  if (!r.out.trim()) return { error: r.err || `gh ${kind} returned nothing` }
+  if (GH_SHAPE[kind]) {
+    try { return { text: capped(r.out.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l))) } } catch { return { text: capped(r.out) } }
+  }
+  if (jq != null) return { text: capped(r.out.trimEnd()) }
+  try { return { text: capped(JSON.parse(r.out)) } } catch { return { text: capped(r.out.trimEnd()) } }
+}
+// The user's GitHub login, from gh (cached once known): whose PRs github_write may touch.
+let ghLoginCache = null
+async function ghUser() {
+  if (ghLoginCache) return ghLoginCache
+  const r = await gh(['api', 'user', '--jq', '.login'])
+  return r.ok && r.out.trim() ? (ghLoginCache = r.out.trim()) : null
+}
+const JIRA_KEY = /^[A-Z][A-Z0-9_]*-\d+$/
+const THREAD_ID = /^[A-Za-z0-9_=]+$/
+// github_write → { ok, ... } or { error }. Only the user's own PRs, only these two writes.
+async function githubWrite(a) {
+  const bad = Object.entries(a).find(([k, v]) => k !== 'body' && typeof v === 'string' && v.trim().startsWith('-')) // body travels inside -f body=…
+  if (bad) return { error: `${bad[0]} must not start with -` }
+  const me = await ghUser()
+  if (!me) return { error: 'could not read your GitHub login from gh (is it installed and authenticated?)' }
+  if (a.action === 'retitle') {
+    const num = String(a.number ?? '').replace(/^#/, '').trim()
+    if (!GH_REPO.test(a.repo || '') || !/^\d+$/.test(num)) return { error: 'retitle needs repo (owner/name) and number' }
+    if (!JIRA_KEY.test(a.key || '')) return { error: 'key must be a Jira key, e.g. ABC-1234' }
+    const v = await gh(['pr', 'view', num, '--repo', a.repo, '--json', 'author,isDraft,title'])
+    let pr; try { pr = JSON.parse(v.out) } catch { return { error: v.err || 'could not read the PR' } }
+    if ((pr.author?.login || '').toLowerCase() !== me.toLowerCase()) return { error: `refused: #${num} is ${pr.author?.login || 'someone else'}'s PR, not yours` }
+    if (pr.isDraft) return { error: `refused: #${num} is a draft` }
+    if (pr.title.startsWith(`[${a.key}]`) || pr.title.startsWith(a.key)) return { ok: true, title: pr.title, unchanged: true }
+    const title = `[${a.key}] ${pr.title}`
+    const e = await gh(['pr', 'edit', num, '--repo', a.repo, `--title=${title}`])
+    return e.ok ? { ok: true, title } : { error: e.err || 'gh pr edit failed' }
+  }
+  if (a.action === 'reply_thread') {
+    if (!THREAD_ID.test(a.threadId || '')) return { error: 'threadId must be a review thread node id' }
+    if (typeof a.body !== 'string' || !a.body.trim()) return { error: 'body required' }
+    const t = await ghGraphql('query($id:ID!){node(id:$id){... on PullRequestReviewThread{isResolved pullRequest{number author{login}}}}}', { id: a.threadId })
+    if (t.error) return { error: t.error }
+    const thread = t.data.node
+    if (!thread?.pullRequest) return { error: 'not a review thread: ' + a.threadId }
+    if ((thread.pullRequest.author?.login || '').toLowerCase() !== me.toLowerCase()) return { error: `refused: the thread is on #${thread.pullRequest.number}, ${thread.pullRequest.author?.login || 'someone else'}'s PR, not yours` }
+    if (thread.isResolved) return { ok: true, alreadyResolved: true }
+    const r = await ghGraphql('mutation($id:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){comment{url}}}', { id: a.threadId, body: a.body })
+    if (r.error) return { error: r.error }
+    const out = { ok: true, replied: r.data.addPullRequestReviewThreadReply?.comment?.url || true }
+    if (a.resolve) {
+      const x = await ghGraphql('mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}', { id: a.threadId })
+      if (x.error) return { ...out, ok: false, error: 'replied, but resolving failed: ' + x.error }
+      out.resolved = true
+    }
+    return out
+  }
+  return { error: 'action must be retitle or reply_thread' }
 }
 
 // Run the searches, paging each alias that returned a full page. A failed first
@@ -1129,13 +1366,22 @@ function tickJiraCalls(repos, defaultsMd, projectMd, ledgerMd) {
     const led = g.ledger.size ? `key in (${[...g.ledger].join(', ')})` : null
     const jql = mine && led ? `(${mine}) OR ${led}` : mine || led
     if (!jql) continue
-    const fields = ['summary', 'status', 'priority', 'duedate', 'assignee', 'project', ...(g.qaField ? [g.qaField] : [])]
-    const call = { args: { cloudId: g.cloudId, jql, fields, maxResults: 100 } }
+    const fields = ['summary', 'status', 'priority', 'duedate', 'assignee', ...(g.qaField ? [g.qaField] : [])]
+    const call = { args: { cloudId: g.cloudId, jql, fields, maxResults: 50 } }
     if (g.qaColumns) call.qaColumns = g.qaColumns
     calls.push(call)
   }
   return calls
 }
+
+// Whether a project reviews every teammate PR in its repo, not only the user's requests.
+function repoWide(id, dmd = readDefaults()) {
+  const md = readMd(projectFile(id))
+  const v = readField(md, TICK_F.reviewScope) ?? readField(md, REPO_WIDE_F) ?? readField(dmd, TICK_F.reviewScope)
+  return !!v && !/^mine/i.test(v)
+}
+// Whether a project's project.md sets its own Jira site or QA fields over defaults.md's.
+const jiraOverride = (id) => { const md = readMd(projectFile(id)); return ['cloudId', 'qaAssigneeField', 'qaColumns'].some((k) => readField(md, TICK_F[k]) != null) }
 
 // One tick: { out, snap }. `out` is what the tool returns; `snap`, set only when
 // the search completed, is the snapshot the next delta is taken against.
@@ -1148,11 +1394,7 @@ async function tickSnapshot(prev, gql = ghGraphql) {
     if (r.error) return { out: { error: r.error, jira } }
     login = r.data.viewer.login
   }
-  const scope = repos.filter((r) => {
-    const md = readMd(projectFile(r.id))
-    const v = readField(md, TICK_F.reviewScope) ?? readField(md, REPO_WIDE_F) ?? readField(dmd, TICK_F.reviewScope)
-    return v && !/^mine/i.test(v)
-  }).map((r) => r.slug)
+  const scope = repos.filter((r) => repoWide(r.id, dmd)).map((r) => r.slug)
   const r = await runTickSearch(login, tickSearches(scope), gql)
   if (r.error) return { out: { error: r.error, jira } }
   const projects = tickShape(r.nodes, repos, login)
@@ -1166,7 +1408,7 @@ async function tickSnapshot(prev, gql = ghGraphql) {
 // copy. Returns the ref to branch from, or null → caller falls back to HEAD.
 async function resolveBaseRef(repo) {
   const base = await defaultBase(repo)
-  await runGit(repo.path, ['fetch', 'origin', base]) // make the base current before branching
+  await runGit(repo.path, ['fetch', '--', 'origin', base]) // make the base current before branching
   if ((await runGit(repo.path, ['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/' + base])).ok) return 'origin/' + base
   if ((await runGit(repo.path, ['rev-parse', '--verify', '--quiet', 'refs/heads/' + base])).ok) return base
   return null
@@ -1174,12 +1416,13 @@ async function resolveBaseRef(repo) {
 
 // The project's base branch name: configured, else origin's default, else main.
 async function defaultBase(repo) {
-  if (repo.baseBranch) return repo.baseBranch
+  if (repo.baseBranch && !repo.baseBranch.startsWith('-')) return repo.baseBranch
   const sym = await runGit(repo.path, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD'])
   return sym.ok ? sym.out.trim().replace('refs/remotes/origin/', '') : 'main'
 }
 
 async function createWorktree(repo, branch) {
+  if (!branch || branch.startsWith('-')) return { error: 'a branch name must not start with -' }
   const name = branch.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/\.\.+/g, '-').replace(/^[.\-]+|[.\-]+$/g, '') || 'wt'
   const wt = join(worktreeBase(repo), name)
   const localEx = (await runGit(repo.path, ['rev-parse', '--verify', '--quiet', 'refs/heads/' + branch])).ok
@@ -1269,30 +1512,51 @@ async function removeWorktree(repo, wt, force) {
   return { ok: true }
 }
 
-// Reveal a folder in the OS. 'editor' → VS Code (`code`), falling back on macOS
-// to `open -a`; 'files' → the platform file manager. Fire-and-forget: we don't
-// wait on the GUI app, only report whether the launcher spawned.
-function openInOs(cwd, target) {
+// Reveal a folder in the OS, or open a URL in the default browser. 'editor' → VS Code
+// (`code`, resolved on Windows by winSpawnTarget), falling back on macOS to `open -a`;
+// 'files' → the platform file manager; 'url' → the platform opener. Resolves once the
+// launcher exits (they hand off to the GUI app and return): { ok } or { error }.
+// explorer.exe exits 1 even when it opened the target, so only its failing to start counts.
+function openInOs(target, how) {
   const plat = process.platform
-  let file, args
-  if (target === 'editor') {
-    file = 'code'; args = ['-n', cwd]
-  } else {
-    file = plat === 'darwin' ? 'open' : plat === 'win32' ? 'explorer' : 'xdg-open'
-    args = [cwd]
-  }
-  try {
-    const child = execFile(file, args, { timeout: 10000 }, (err) => {
-      // On macOS, fall back to launching VS Code by app name when `code` isn't on PATH.
-      if (err && target === 'editor' && plat === 'darwin') execFile('open', ['-a', 'Visual Studio Code', cwd], () => {})
+  const opener = plat === 'darwin' ? 'open' : WIN ? 'explorer.exe' : 'xdg-open'
+  const run = (file, args) => new Promise((res) => {
+    try { [file, args] = winSpawnTarget(file, args) } catch (e) { return res({ error: e.message }) }
+    execFile(file, args, { timeout: 10000, windowsHide: true }, (err) => {
+      if (!err || (file === 'explorer.exe' && err.code !== 'ENOENT')) return res({ ok: true })
+      res({ error: err.code === 'ENOENT' ? `${file} not found on PATH` : lastLine(err.message) })
     })
-    child.on('error', () => {})
-    return { ok: true }
-  } catch (e) { return { error: e.message } }
+  })
+  if (how !== 'editor') return run(opener, [target])
+  return run('code', ['-n', target]).then((r) => (r.error && plat === 'darwin' ? run('open', ['-a', 'Visual Studio Code', target]) : r))
 }
 
+const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
+// A request's JSON body when it is a plain object, else {}. Past MAX_BODY it rejects with
+// a 413 (handleRequest answers it) and the rest of the body is drained unread.
+const MAX_BODY = 1024 * 1024
 function readBody(req) {
-  return new Promise((r) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => { try { r(JSON.parse(b || '{}')) } catch { r({}) } }) })
+  return new Promise((r, reject) => {
+    let b = '', size = 0, over = false
+    req.on('data', (c) => {
+      if (over) return
+      size += c.length
+      if (size > MAX_BODY) { over = true; b = ''; reject(Object.assign(new Error('request body over 1 MB'), { status: 413 })) } else b += c
+    })
+    req.on('end', () => { if (over) return; try { const v = JSON.parse(b || '{}'); r(isObj(v) ? v : {}) } catch { r({}) } })
+  })
+}
+
+// Only this machine's own pages and processes: the Host must name the loopback address
+// (so a DNS-rebound name is refused), and a browser's Origin must be the cockpit itself
+// or its dev UI (vite on DEV_PORT, which proxies here and keeps the Host). Non-browser
+// clients (hooks, MCP, the status line) send no Origin.
+const DEV_PORT = 4178
+const LOCAL_HOSTS = ['127.0.0.1', 'localhost', '[::1]'].flatMap((h) => [h, `${h}:${PORT}`, `${h}:${DEV_PORT}`])
+function localRequest(req) {
+  if (!LOCAL_HOSTS.includes(String(req.headers.host || '').toLowerCase())) return false
+  const o = req.headers.origin
+  return o === undefined || LOCAL_HOSTS.some((h) => o.toLowerCase() === 'http://' + h)
 }
 
 // Memory of the cockpit and everything it spawned (the PTYs and their children —
@@ -1525,32 +1789,58 @@ const CT = {
   '.json': 'application/json', '.map': 'application/json', '.svg': 'image/svg+xml',
   '.woff2': 'font/woff2', '.woff': 'font/woff', '.ico': 'image/x-icon', '.png': 'image/png'
 }
+// Write ~/.claude/settings.json whole (atomicWrite), after backing it up: the 3 newest
+// .bak-jeeves-* are kept.
+const SETTINGS_BACKUPS = 3
+function writeSettings(file, obj) {
+  const dest = existsSync(file) ? realpathSync(file) : file
+  if (existsSync(dest)) copyFileSync(dest, `${file}.bak-jeeves-${Date.now()}`)
+  atomicWrite(file, JSON.stringify(obj, null, 2) + '\n')
+  const pre = basename(file) + '.bak-jeeves-'
+  const baks = readdirSync(dirname(file)).filter((n) => n.startsWith(pre) && /^\d+$/.test(n.slice(pre.length))).sort((a, b) => b.slice(pre.length) - a.slice(pre.length))
+  for (const n of baks.slice(SETTINGS_BACKUPS)) { try { unlinkSync(join(dirname(file), n)) } catch {} }
+}
 function sendJson(res, obj, code = 200) { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)) }
 
+// A handler that throws answers 500 (when nothing was sent yet); the server and its PTYs live on.
 const server = http.createServer(async (req, res) => {
+  try { await handleRequest(req, res) } catch (e) {
+    if (e?.status && !res.headersSent) return sendJson(res, { error: e.message }, e.status)
+    console.error(`cockpit: ${req.method} ${String(req.url).split('?')[0]} failed:`, e)
+    if (!res.headersSent) sendJson(res, { error: 'internal error' }, 500); else res.end()
+  }
+})
+async function handleRequest(req, res) {
   const url = new URL(req.url, 'http://localhost')
   const path = url.pathname
+  if (!localRequest(req)) return sendJson(res, { error: 'forbidden: not a local request' }, 403)
 
-  // ── MCP control plane (token-gated via Authorization header from --mcp-config) ──
+  // ── MCP control plane (its token, from --mcp-config's Authorization header, says who calls) ──
   if (path === '/mcp') {
-    if (!authed(req, url)) { res.writeHead(401, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ error: 'unauthorized' })) }
-    return handleMcp(req, res)
+    const who = mcpCaller(bearer(req))
+    if (!who) return sendJson(res, { error: 'unauthorized' }, 401)
+    return handleMcp(req, res, who)
   }
 
   // ── API (token-gated; static assets below stay open so the page can boot) ──
   // The account's rate limits, reported by the status line relay of any session the
   // cockpit launched (bin/statusline.mjs --relay). The latest report wins.
   if (req.method === 'POST' && path === '/api/usage') {
-    const t = Buffer.from(String(url.searchParams.get('token') || '')), k = Buffer.from(USAGE_TOKEN)
-    if (t.length !== k.length || !timingSafeEqual(t, k)) return sendJson(res, { error: 'unauthorized' }, 401)
+    if (!sameToken(url.searchParams.get('token'), USAGE_TOKEN)) return sendJson(res, { error: 'unauthorized' }, 401)
     const b = await readBody(req), lim = (x) => (x && Number.isFinite(+x.used_percentage) ? { used: +x.used_percentage, resetsAt: Number.isFinite(+x.resets_at) ? +x.resets_at * 1000 : null } : null)
     const next = { fiveHour: lim(b.rate_limits?.five_hour), sevenDay: lim(b.rate_limits?.seven_day), at: Date.now() }
     if (next.fiveHour || next.sevenDay) { const moved = JSON.stringify([next.fiveHour, next.sevenDay]) !== JSON.stringify([usage?.fiveHour, usage?.sevenDay]); usage = next; if (moved) pushContext() }
     return sendJson(res, { ok: true })
   }
+  // Lifecycle pings from per-session Claude Code hooks, on their own token (HOOK_TOKEN).
+  if (req.method === 'POST' && path === '/api/hook') {
+    if (!sameToken(url.searchParams.get('token'), HOOK_TOKEN)) return sendJson(res, { error: 'unauthorized' }, 401)
+    return handleHook(req, res)
+  }
   if (path.startsWith('/api/')) {
     if (!authed(req, url)) return sendJson(res, { error: 'unauthorized' }, 401)
   }
+  if (path === '/api/config') rescanRepos()
   if (path === '/api/config') return sendJson(res, { repos: REPOS, home: NEUTRAL, scratchRoot: SCRATCH_ROOT, appearance: appearance() })
   // Health for the bottom-left connected pill: server memory + live PTY counts by kind.
   if (path === '/api/health') {
@@ -1575,6 +1865,8 @@ const server = http.createServer(async (req, res) => {
     const body = await readBody(req)
     if (!body.layout || typeof body.layout !== 'object' || !Array.isArray(body.layout.spaces)) return sendJson(res, { error: 'bad layout' }, 400)
     saveLayout(body.layout)
+    const ids = new Set([...body.layout.spaces, body.layout.scratch].flatMap((sp) => (Array.isArray(sp?.tabs) ? sp.tabs : []).map((t) => t?.id)))
+    for (const [ref, t] of orchTabs) if (!ids.has(ref) && Date.now() - t.openedAt > ORCH_TAB_GRACE_MS) dropOrchTab(ref)
     broadcast({ t: 'layout', layout, from: String(body.from || '') })
     return sendJson(res, { ok: true })
   }
@@ -1583,36 +1875,7 @@ const server = http.createServer(async (req, res) => {
     const body = await readBody(req)
     const s = sessions.get('orch:main')
     if (!s) return sendJson(res, { error: 'orchestrator not running' }, 400)
-    if (typeof body.text === 'string' && body.text) { try { s.term.write(body.text + (body.submit ? '\r' : '')) } catch {} }
-    return sendJson(res, { ok: true })
-  }
-  // Lifecycle pings from per-session Claude Code hooks. Never fail one — a non-200
-  // would surface as a hook error in the session; just no-op on anything unknown.
-  if (req.method === 'POST' && path === '/api/hook') {
-    const body = await readBody(req)
-    const id = body.id, next = body.status
-    // Follow the live session id: /clear and /resume switch claude to a new one, and
-    // a respawn that resumes the stale id comes back blank.
-    const liveSid = typeof body.sessionId === 'string' && /^[0-9a-f-]{36}$/i.test(body.sessionId) ? body.sessionId : null
-    if (liveSid && id === 'orch:main' && liveSid !== ORCH_SESSION_ID) setOrchSessionId(liveSid)
-    if (liveSid && bus.workers.has(id) && bus.workers.get(id).sessionId !== liveSid) { bus.workers.get(id).sessionId = liveSid; saveWorkers() }
-    if (liveSid && tabSessions.has(id) && tabSessions.get(id).sessionId !== liveSid) { tabSessions.get(id).sessionId = liveSid; saveTabs() }
-    if (id === 'orch:main') {
-      const was = orchStatus
-      orchStatus = applyHookStatus(orchStatus, next)
-      if (orchStatus !== 'idle') orchIdleSince = 0
-      else if (was !== 'idle' || !orchIdleSince) orchIdleSince = Date.now()
-      lastContext = { ...lastContext, status: orchStatus, updatedAt: Date.now() }
-      pushContext()
-    } else if (bus.workers.has(id)) {
-      const w = bus.workers.get(id)
-      w.status = applyHookStatus(w.status, next); w.updatedAt = Date.now(); saveWorkers(); pushSpaces()
-    } else if (id) {
-      // A user-opened claude tab (sid = spaceId:tabId).
-      const nx = applyHookStatus(sessionStatus.get(id) ?? 'idle', next)
-      sessionStatus.set(id, nx)
-      pushSessionStatus(id, nx)
-    }
+    if (typeof body.text === 'string' && body.text) { orchInputAt = Date.now(); try { s.term.write(body.text + (body.submit ? '\r' : '')) } catch {} }
     return sendJson(res, { ok: true })
   }
   if (path === '/api/spaces') return sendJson(res, { spaces: workerList() })
@@ -1625,19 +1888,21 @@ const server = http.createServer(async (req, res) => {
   // it, backing settings.json up first. A different status line already set is only
   // replaced when the request says so.
   if (path === '/api/statusline') {
+    const body = req.method === 'POST' ? await readBody(req) : {}
     const dir = join(os.homedir(), '.claude'), file = join(dir, 'settings.json'), target = join(dir, 'jeeves-statusline.mjs')
     let cfgJson = {}
-    try { cfgJson = JSON.parse(readFileSync(file, 'utf8')) } catch (e) { if (existsSync(file)) return sendJson(res, { error: 'could not read ~/.claude/settings.json: ' + e.message }, 500) }
-    const current = cfgJson.statusLine?.command ?? null, ours = !!current && /jeeves-statusline\.mjs/.test(current)
+    if (existsSync(file)) {
+      try { cfgJson = JSON.parse(readFileSync(file, 'utf8')) } catch (e) { return sendJson(res, { error: 'could not read ~/.claude/settings.json: ' + e.message }, 500) }
+      if (!isObj(cfgJson)) return sendJson(res, { error: '~/.claude/settings.json is not a JSON object' }, 500)
+    }
+    const cmd = cfgJson.statusLine?.command, current = typeof cmd === 'string' ? cmd : null, ours = !!current && /jeeves-statusline\.mjs/.test(current)
     if (req.method !== 'POST') return sendJson(res, { current, installed: ours })
-    const body = await readBody(req)
     if (current && !ours && !body.replace) return sendJson(res, { current, installed: false, needsConfirm: true })
     try {
       mkdirSync(dir, { recursive: true })
       copyFileSync(STATUSLINE_SCRIPT, target)
-      if (existsSync(file)) copyFileSync(file, `${file}.bak-jeeves-${Date.now()}`)
-      cfgJson.statusLine = { type: 'command', command: `node "${target}"`, padding: 1, refreshInterval: 30 }
-      writeFileSync(file, JSON.stringify(cfgJson, null, 2) + '\n')
+      cfgJson.statusLine = { type: 'command', command: `"${process.execPath}" "${target}"`, padding: 1, refreshInterval: 30 }
+      writeSettings(file, cfgJson)
     } catch (e) { return sendJson(res, { error: 'install failed: ' + e.message }, 500) }
     return sendJson(res, { current: cfgJson.statusLine.command, installed: true })
   }
@@ -1709,14 +1974,20 @@ const server = http.createServer(async (req, res) => {
     const body = await readBody(req)
     const cwd = body.cwd
     if (!cwd || !allowedCwd(cwd)) return sendJson(res, { error: 'cwd not allowed' }, 400)
-    const out = openInOs(cwd, body.target === 'editor' ? 'editor' : 'files')
+    const out = await openInOs(cwd, body.target === 'editor' ? 'editor' : 'files')
     return sendJson(res, out, out.error ? 400 : 200)
+  }
+  // A claude tab the UI is about to add starts on this prompt (its first spawn consumes it).
+  if (req.method === 'POST' && path === '/api/tab-prompt') {
+    const { tabId, prompt } = await readBody(req)
+    if (typeof tabId !== 'string' || !TAB_ID.test(tabId)) return sendJson(res, { error: 'tabId must match ' + TAB_ID }, 400)
+    if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > MAX_TAB_PROMPT) return sendJson(res, { error: `prompt must be 1–${MAX_TAB_PROMPT} characters` }, 400)
+    pendingLaunches.set(tabId, { kind: 'claude', prompt, at: Date.now() })
+    return sendJson(res, { ok: true })
   }
   if (req.method === 'DELETE' && path === '/api/session') {
     const sid = url.searchParams.get('sid')
-    const s = sid && sessions.get(sid)
-    if (s) { try { s.term.kill() } catch {}; sessions.delete(sid) }
-    if (sid) { sessionStatus.delete(sid); if (tabSessions.delete(sid)) saveTabs() } // drop the persisted resume record too
+    if (sid) closeSession(sid)
     return sendJson(res, { ok: true })
   }
   if (path === '/api/worktrees') {
@@ -1775,7 +2046,7 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req)
       let out = {}
       if (typeof body.loopConstraints === 'string') {
-        try { await writeFile(join(NEUTRAL, 'loop-constraints.md'), body.loopConstraints) }
+        try { atomicWrite(join(NEUTRAL, 'loop-constraints.md'), body.loopConstraints) }
         catch (e) { out = { error: 'write failed: ' + e.message } }
       } else if (body.cockpit) out = await writeCockpit(body.cockpit)
       else if (body.rotateToken === true) out = await rotateToken()
@@ -1797,6 +2068,7 @@ const server = http.createServer(async (req, res) => {
     const out = await editReminders(await readBody(req))
     return out.error ? sendJson(res, out, 400) : sendJson(res, remindersView())
   }
+  if (path.startsWith('/api/')) return sendJson(res, { error: 'not found' }, 404)
 
   // ── Static (built app). In dev, Vite serves the UI and proxies /pty + /api here. ──
   if (!existsSync(DIST)) {
@@ -1815,7 +2087,40 @@ const server = http.createServer(async (req, res) => {
       res.end(await readFile(join(DIST, 'index.html')))
     } catch { res.writeHead(404); res.end('not found') }
   }
-})
+}
+
+// Lifecycle pings from per-session Claude Code hooks. Never fail one — a non-200
+// would surface as a hook error in the session; just no-op on anything unknown.
+async function handleHook(req, res) {
+  const body = await readBody(req)
+  const id = typeof body.id === 'string' ? body.id : null, next = body.status
+  // Follow the live session id: /clear and /resume switch claude to a new one, and
+  // a respawn that resumes the stale id comes back blank.
+  const liveSid = typeof body.sessionId === 'string' && /^[0-9a-f-]{36}$/i.test(body.sessionId) ? body.sessionId : null
+  if (id === 'orch:main' && next === 'compact') { compactGen++; return sendJson(res, { ok: true }) }
+  // A replaced orchestrator's SessionEnd (after a restart) names its old session: not the live one.
+  if (id === 'orch:main' && next === 'offline' && liveSid && liveSid !== ORCH_SESSION_ID) return sendJson(res, { ok: true })
+  if (liveSid && id === 'orch:main' && liveSid !== ORCH_SESSION_ID) setOrchSessionId(liveSid)
+  if (liveSid && bus.workers.has(id) && bus.workers.get(id).sessionId !== liveSid) { bus.workers.get(id).sessionId = liveSid; saveWorkers() }
+  if (liveSid && tabSessions.has(id) && tabSessions.get(id).sessionId !== liveSid) { tabSessions.get(id).sessionId = liveSid; saveTabs() }
+  if (id === 'orch:main') {
+    const was = orchStatus
+    orchStatus = applyHookStatus(orchStatus, next)
+    if (orchStatus !== 'idle') orchIdleSince = 0
+    else if (was !== 'idle' || !orchIdleSince) orchIdleSince = Date.now()
+    lastContext = { ...lastContext, status: orchStatus, updatedAt: Date.now() }
+    pushContext()
+  } else if (bus.workers.has(id)) {
+    const w = bus.workers.get(id)
+    w.status = applyHookStatus(w.status, next); w.updatedAt = Date.now(); saveWorkers(); pushSpaces()
+  } else if (id) {
+    // A user-opened claude tab (sid = spaceId:tabId).
+    const nx = applyHookStatus(sessionStatus.get(id) ?? 'idle', next)
+    sessionStatus.set(id, nx)
+    pushSessionStatus(id, nx)
+  }
+  return sendJson(res, { ok: true })
+}
 
 // ── PTY over WebSocket ───────────────────────────────────────────────────────
 // ── PTY session registry ─────────────────────────────────────────────────────
@@ -1823,6 +2128,44 @@ const server = http.createServer(async (req, res) => {
 // the PTY alive so a UI reload can re-attach; sessions die on explicit close
 // (DELETE /api/session), on process exit, or after too long detached.
 const sessions = new Map()
+// End a tab's session for good: its PTY, its status and its persisted resume record.
+function closeSession(sid) {
+  const s = sessions.get(sid)
+  if (s) { try { s.term.kill() } catch {}; sessions.delete(sid) }
+  sessionStatus.delete(sid)
+  if (tabSessions.delete(sid)) saveTabs()
+  dropOrchTab(sid.split(':').pop())
+  endBackgroundSessions(sid)
+  forgetSession(sid, sid)
+}
+// A session that is gone for good: its MCP token stops working and its files go.
+function forgetSession(caller, hookId) {
+  for (const [t, v] of mcpTokens) if (v.caller === caller) revokeMcpToken(t)
+  for (const f of [sessionFile(caller, '.mcp.json'), sessionFile(hookId, '.settings.json')]) { try { unlinkSync(f) } catch {} }
+}
+
+// A Claude session can hand work to a background session (Claude Code's own daemon runs
+// it, as `--bg-pty-host … --fork-session`), which outlives the PTY a close kills. Every
+// session the cockpit launches carries `--settings <its hook id's settings file>`, and a
+// forked one inherits it, so end every process still carrying that path — except any under a live
+// PTY, so a tab reopened straight away under the same id is left alone. TERM, then KILL
+// whatever is still there after 3 s.
+async function endBackgroundSessions(id) {
+  const out = WIN
+    ? await execOut('powershell', ['-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) $($_.CommandLine)" }'], 10000)
+    : await execOut('ps', ['-axo', 'pid=,ppid=,command='])
+  if (!out) return
+  const marker = sessionFile(id, '.settings.json')
+  const procs = out.split('\n').map((l) => l.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean).map((m) => ({ pid: +m[1], ppid: +m[2], cmd: m[3] }))
+  const parent = new Map(procs.map((p) => [p.pid, p.ppid]))
+  const live = new Set([process.pid, ...[...sessions.values()].map((x) => x.term.pid)])
+  const underLive = (pid) => { for (let p = pid, n = 0; p && n < 64; p = parent.get(p), n++) if (live.has(p)) return true; return false }
+  const doomed = procs.filter((p) => p.cmd.includes(marker) && !underLive(p.pid)).map((p) => p.pid)
+  if (!doomed.length) return
+  for (const pid of doomed) { try { process.kill(pid, 'SIGTERM') } catch {} }
+  setTimeout(() => { for (const pid of doomed) { try { process.kill(pid, 0); process.kill(pid, 'SIGKILL') } catch {} } }, 3000).unref()
+  console.log(`closed ${doomed.length} background Claude process${doomed.length === 1 ? '' : 'es'} left by ${id}`)
+}
 const MAX_BUF = 256 * 1024
 const MAX_UPLOAD = 25 * 1024 * 1024 // cap dropped-file size
 
@@ -1846,27 +2189,51 @@ function claudeTheme() {
   return uiScheme + _themeVariant
 }
 
-// Per-session --settings for every claude the cockpit launches: lifecycle hooks
-// keyed by id (so its dot reflects working / awaiting / idle) and the UI-matched theme.
-function sessionSettings(id) {
-  const url = `http://${HOST}:${PORT}/api/hook?token=${encodeURIComponent(SESSION_TOKEN)}`
+// Per-session --settings for every claude the cockpit launches, written to its own file:
+// lifecycle hooks keyed by id (so its dot reflects working / awaiting / idle) and the
+// UI-matched theme. Returns the file's path.
+function sessionSettings(id, deny = []) {
   // A Node helper (not curl + POSIX redirection) so hooks fire the same on macOS,
-  // Linux and Windows. process.execPath is the running node binary.
-  const post = (status) => ({ hooks: [{ type: 'command', command: `"${process.execPath}" "${HOOK_SCRIPT}" "${id}" "${status}" "${url}"` }] })
+  // Linux and Windows. process.execPath is the running node binary. The hook's URL,
+  // with its token, is $JEEVES_HOOK_URL in the session's environment (PTY_ENV).
+  const post = (status) => ({ hooks: [{ type: 'command', command: `"${process.execPath}" "${HOOK_SCRIPT}" "${id}" "${status}"` }] })
   // The status line relays the rate limits to the cockpit, then shows the user's own
   // status line (bin/statusline.mjs --relay), so the terminal looks as it always does.
-  return JSON.stringify({ theme: claudeTheme(), tui: cfg('claudeTui'), statusLine: { type: 'command', command: `"${process.execPath}" "${STATUSLINE_SCRIPT}" --relay`, padding: 1, refreshInterval: 30 }, hooks: {
+  return writeSessionFile(id, '.settings.json', { theme: claudeTheme(), tui: cfg('claudeTui'), ...(deny.length ? { permissions: { deny } } : {}), statusLine: { type: 'command', command: `"${process.execPath}" "${STATUSLINE_SCRIPT}" --relay`, padding: 1, refreshInterval: 30 }, hooks: {
     SessionStart: [post('working')],
     UserPromptSubmit: [post('working')],
     Notification: [post('awaiting')],
     Stop: [post('idle')],
     SessionEnd: [post('offline')],
-    // The orchestrator dispatches work and never does it (bin/guard-orchestrator.mjs):
-    // no edits outside its data home, ledgers only through write_state, reads of its
-    // own files only, an allowlisted Bash, no Agent/Task, and no skills but loop and jeeves:*.
-    ...(id === 'orch:main' ? { PreToolUse: [{ matcher: 'Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|Bash|Agent|Task|Skill', hooks: [{ type: 'command', command: `"${process.execPath}" "${GUARD_SCRIPT}" "${NEUTRAL}" "${join(__dirname, '..')}"` }] }] } : {})
+    // The orchestrator's context is about to be summarised: its next tick_snapshot is whole.
+    ...(id === 'orch:main' ? { PreCompact: [post('compact')] } : {}),
+    // The orchestrator dispatches work and never does it (bin/guard-orchestrator.mjs): every
+    // tool call, MCP included, goes past the guard, which refuses whatever it doesn't allow.
+    ...(id === 'orch:main' ? { PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: `"${process.execPath}" "${GUARD_SCRIPT}" "${NEUTRAL}" "${join(__dirname, '..')}"` }] }] } : {})
   } })
 }
+
+// Agents that must not change what they look at, held to it mechanically as well as by
+// their prompt: every git push fails (a push URL rewritten to one no remote helper serves,
+// through git's GIT_CONFIG_* environment — fetches are untouched) and Claude Code denies
+// the write commands. The reviewer keeps gh, so it can post the review the user picked.
+// A gh api write through -f fields alone (an implied POST) can't be told from a GraphQL
+// read by a rule, so only an explicit -X / --method is denied.
+const NO_PUSH_URL = 'jeeves-read-only://push-disabled/'
+const NO_PUSH_ENV = {
+  GIT_CONFIG_COUNT: '2',
+  GIT_CONFIG_KEY_0: `url.${NO_PUSH_URL}.pushInsteadOf`, GIT_CONFIG_VALUE_0: '', // every push URL, any remote
+  GIT_CONFIG_KEY_1: 'remote.origin.pushurl', GIT_CONFIG_VALUE_1: NO_PUSH_URL
+}
+const DENY_COMMITS = ['Bash(git push:*)', 'Bash(git commit:*)', 'Bash(gh pr merge:*)']
+const DENY_POSTS = ['Bash(gh pr comment:*)', 'Bash(gh pr review:*)', 'Bash(gh pr edit:*)', 'Bash(gh issue comment:*)', 'Bash(gh api *-X*)', 'Bash(gh api *--method*)']
+const AGENT_LIMITS = {
+  investigator: { env: NO_PUSH_ENV, deny: [...DENY_COMMITS, ...DENY_POSTS] },
+  planner: { env: NO_PUSH_ENV, deny: [...DENY_COMMITS, ...DENY_POSTS] },
+  'loop-verifier': { env: NO_PUSH_ENV, deny: [...DENY_COMMITS, ...DENY_POSTS] },
+  reviewer: { env: NO_PUSH_ENV, deny: DENY_COMMITS }
+}
+const agentLimits = (name) => AGENT_LIMITS[name] || { env: {}, deny: [] }
 
 // Hook lifecycle states compose with the semantic ones from `report`. A report's
 // outcome (done/blocked/error) is authoritative and STICKS: a lifecycle hook must
@@ -1897,11 +2264,15 @@ function workerConstraints() {
 // back over the bus, and the loop constraints. Shared by the initial dispatch and a
 // post-restart resume.
 function workerPreamble(workId) {
-  return `You are a Jeeves worker running inside the cockpit, in an isolated git worktree. Your workId is "${workId}". You never post to GitHub on the loop's behalf — open your own PR only — unless your agent instructions say when. When the task is complete or you are blocked, report in THREE steps, IN THIS ORDER: (1) ALWAYS FIRST write your FULL result to a file "JEEVES_REPORT.md" at the ROOT of your worktree — a fenced JSON block with { workId: "${workId}", status: "done"|"blocked"|"error", summary, pr, verdict, threads } followed by the substance in prose. Write this EVERY time, not only on failure: it is the durable record the loop falls back to, and it survives a cockpit restart when nothing else does. (2) Call the MCP tool "report" (server "cockpit") with { workId: "${workId}", status, summary, pr, verdict, threads }. If it errors (e.g. cockpit MCP down / ConnectionRefused), retry it at most ONCE — do not thrash; JEEVES_REPORT.md from step 1 already covers you. (3) Send ONE cross-session message to the session named "${ORCH_NAME}" (SendMessage, to: "${ORCH_NAME}") carrying the FULL result (not just a one-liner), so it can act immediately even if the report call was refused. Do not resend it in a loop — one message, then finish. The orchestrator sees your work through the report, the message, or JEEVES_REPORT.md — never through printed terminal text.` + workerConstraints()
+  return `You are a Jeeves worker running inside the cockpit, in an isolated git worktree. Your workId is "${workId}". You never post to GitHub on the loop's behalf — open your own PR only — unless your agent instructions say when. When the task is complete or you are blocked, report in THREE steps, IN THIS ORDER: (1) ALWAYS FIRST write your FULL result to a file "JEEVES_REPORT.md" at the ROOT of your worktree — a fenced JSON block with { workId: "${workId}", status: "done"|"blocked"|"error", summary, pr, verdict, threads } followed by the substance in prose. Write this EVERY time, not only on failure: it is the durable record the loop falls back to, and it survives a cockpit restart when nothing else does. The "report" tool and SendMessage may arrive deferred: load them with ToolSearch ("select:mcp__cockpit__report,SendMessage") — a deferred tool is not a missing one. (2) Call the MCP tool "report" (server "cockpit") with { workId: "${workId}", status, summary, pr, verdict, threads }. If it errors (e.g. cockpit MCP down / ConnectionRefused), retry it at most ONCE — do not thrash; JEEVES_REPORT.md from step 1 already covers you. (3) Send ONE cross-session message per report to the session named "${ORCH_NAME}" (SendMessage, to: "${ORCH_NAME}") carrying the FULL result (not just a one-liner), so it can act immediately even if the report call was refused. Never resend the same report; a later, different report (e.g. after a follow-up task) gets its own three steps and its own message. Then finish, or wait if your agent instructions say to stay available. The orchestrator sees your work through the report, the message, or JEEVES_REPORT.md — never through printed terminal text.` + workerConstraints()
 }
 
 // The orchestrator is a real `claude` booting the Jeeves loop, wired to this
 // process's MCP server and given a known session id so we can read its context.
+// Its built-in tools: reads, its own bookkeeping, the loop, and messaging — no shell,
+// no native subagents (the cockpit MCP tools cover status reads; work goes to dispatch).
+// `--tools=` in one argument, since the flag is variadic and would swallow the prompt.
+const ORCH_TOOLS = ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Skill', 'ToolSearch', 'ScheduleWakeup', 'SendMessage', 'ListAgents', 'PushNotification']
 function fileArgsFor(kind, sid, cwd, prompt) {
   // Order matters: --mcp-config is variadic, so it must be followed by another
   // flag (not the positional prompt) or it swallows the prompt as a config path.
@@ -1910,7 +2281,7 @@ function fileArgsFor(kind, sid, cwd, prompt) {
     // reaper, reopened pane) resume once the transcript exists. Every launch takes
     // the configured model + effort.
     const idArgs = existsSync(orchTranscriptPath()) ? ['--resume', ORCH_SESSION_ID] : ['--session-id', ORCH_SESSION_ID]
-    return { file: 'claude', args: ['--mcp-config', MCP_CONFIG_FILE, ...idArgs, '--model', cfg('orchModel'), '--effort', cfg('orchEffort'), '--settings', sessionSettings('orch:main'), '--permission-mode', cfg('orchPermission'), '--name', ORCH_NAME, '/jeeves:start'] }
+    return { file: 'claude', args: ['--mcp-config', mcpConfig(null, 'orch:main'), ...idArgs, `--tools=${ORCH_TOOLS.join(',')}`, '--model', cfg('orchModel'), '--effort', cfg('orchEffort'), '--settings', sessionSettings('orch:main'), '--permission-mode', cfg('orchPermission'), '--name', ORCH_NAME, '/jeeves:start'] }
   }
   // A dispatched worker respawned after a restart: resume its persisted session so
   // its conversation (and MCP wiring) come back, rather than a blank shell — as the
@@ -1919,7 +2290,8 @@ function fileArgsFor(kind, sid, cwd, prompt) {
     const w = workerList().find((x) => x.sid === sid)
     if (w?.sessionId && existsSync(transcriptPathFor(w.cwd, w.sessionId))) {
       const def = findAgent(w.agent)
-      return { file: 'claude', args: ['--mcp-config', mcpConfig('worker', sid), '--resume', w.sessionId, ...(w.model ? ['--model', w.model] : []), '--permission-mode', cfg('workerPermission'), '--settings', sessionSettings(w.workId), ...(def ? agentArgs(def) : []), '--append-system-prompt', workerPreamble(w.workId)] }
+      const lim = agentLimits(w.agent)
+      return { file: 'claude', env: lim.env, args: ['--mcp-config', mcpConfig('worker', sid), '--resume', w.sessionId, ...(w.model ? ['--model', w.model] : []), '--permission-mode', cfg('workerPermission'), '--settings', sessionSettings(w.workId, lim.deny), ...(def ? agentArgs(def) : []), '--append-system-prompt', workerPreamble(w.workId)] }
     }
     return { file: SHELL, args: [] } // nothing to resume (record/transcript gone)
   }
@@ -1946,20 +2318,24 @@ function fileArgsFor(kind, sid, cwd, prompt) {
 // /etc/zshrc_Apple_Terminal and print "Restored session:" into every new shell.
 // These panes are xterm.js, not Apple Terminal, so strip that machinery.
 const PTY_ENV = (() => {
-  const e = { ...process.env, TERM_PROGRAM: 'jeeves-cockpit', SHELL_SESSIONS_DISABLE: '1', JEEVES_USAGE_URL: `http://${HOST}:${PORT}/api/usage?token=${USAGE_TOKEN}` }
+  const e = {
+    ...process.env, TERM_PROGRAM: 'jeeves-cockpit', SHELL_SESSIONS_DISABLE: '1',
+    JEEVES_USAGE_URL: `http://${HOST}:${PORT}/api/usage?token=${USAGE_TOKEN}`, JEEVES_HOOK_URL: `http://${HOST}:${PORT}/api/hook?token=${HOOK_TOKEN}`
+  }
   delete e.TERM_SESSION_ID
+  delete e.JEEVES_TOKEN // a pinned browser token never reaches a shell
   return e
 })()
 
 // node-pty on Windows looks a bare name up on PATH without PATHEXT, so `claude`
 // finds npm's extensionless sh shim and CreateProcess fails (error code 2). Resolve
 // a bare name with where.exe instead: the .exe if there is one, else the exe an npm
-// .cmd shim points at, else the shim through cmd.exe (which re-parses arguments, so
-// a multi-line --append-system-prompt may not survive). Cached per name.
+// .cmd shim points at, else the shim through cmd.exe. cmd ends a command at a newline, so
+// a multi-line argument through it is refused. Cached per name; a miss only for a minute.
 const _winBin = new Map()
 function winSpawnTarget(file, args) {
   if (!WIN || /[\\/.]/.test(file)) return [file, args]
-  if (!_winBin.has(file)) {
+  if (!_winBin.has(file) || (!_winBin.get(file).hit && Date.now() - _winBin.get(file).at > 60e3)) {
     let hits = []
     try { hits = execFileSync('where.exe', [file], { encoding: 'utf8', windowsHide: true }).split(/\r?\n/).filter(Boolean) } catch {}
     let hit = hits.find((h) => /\.exe$/i.test(h)) || null
@@ -1968,20 +2344,25 @@ function winSpawnTarget(file, args) {
       const m = readFileSync(shim, 'utf8').match(/"%dp0%\\([^"]+\.exe)"/i)
       const exe = m && join(dirname(shim), m[1])
       hit = exe && existsSync(exe) ? exe : shim
-      if (hit === shim) console.error(`cockpit: running ${file} through cmd.exe (${shim}); multi-line arguments may break`)
+      if (hit === shim) console.error(`cockpit: running ${file} through cmd.exe (${shim}); multi-line arguments are refused`)
     }
-    _winBin.set(file, hit)
+    _winBin.set(file, { hit, at: Date.now() })
   }
-  const hit = _winBin.get(file)
+  const { hit } = _winBin.get(file)
   if (!hit) return [file, args]
-  return /\.exe$/i.test(hit) ? [hit, args] : [process.env.ComSpec || 'cmd.exe', ['/d', '/c', hit, ...args]]
+  if (/\.exe$/i.test(hit)) return [hit, args]
+  if (args.some((a) => /[\r\n]/.test(a))) throw new Error(`${file} resolves only to ${hit}, run through cmd.exe, which cannot pass a multi-line argument — install ${file} as an .exe (e.g. Claude Code's native installer)`)
+  return [process.env.ComSpec || 'cmd.exe', ['/d', '/c', hit, ...args]]
 }
 
-function spawnSession(sid, cwd, file, args, kind) {
+// The orchestrator's tick Jira search (~15 issues, bulky nested fields) must come back
+// inline: a spilled result costs it a file read and several Grep turns every tick.
+const ORCH_ENV = { MAX_MCP_OUTPUT_TOKENS: '40000' }
+function spawnSession(sid, cwd, file, args, kind, env = {}) {
   ;[file, args] = winSpawnTarget(file, args)
-  const term = pty.spawn(file, args, { name: 'xterm-256color', cols: 80, rows: 24, cwd, env: { ...PTY_ENV, CLAUDE_CODE_SCROLL_SPEED: String(cfg('scrollSpeed')) } })
+  const term = pty.spawn(file, args, { name: 'xterm-256color', cols: 80, rows: 24, cwd, env: { ...PTY_ENV, CLAUDE_CODE_SCROLL_SPEED: String(cfg('scrollSpeed')), ...(kind === 'orch' ? ORCH_ENV : {}), ...env } })
   const sess = { term, buf: '', clients: new Set(), detachedAt: 0, kind: kind || 'shell', seen: new Map() }
-  const broadcast = (o) => { const msg = JSON.stringify(o); for (const c of sess.clients) if (c.readyState === 1) { try { c.send(msg) } catch {} } }
+  const broadcast = (o) => { const msg = JSON.stringify(o); for (const c of sess.clients) sendTo(c, msg) }
   sessions.set(sid, sess)
   if (sessionStatus.get(sid) === 'exited') { sessionStatus.set(sid, 'working'); pushSessionStatus(sid, 'working') } // respawned
   term.onData((d) => {
@@ -1994,7 +2375,11 @@ function spawnSession(sid, cwd, file, args, kind) {
     // Only drop the registry entry if it is still this PTY: after a kill, a reattach
     // can spawn a replacement under the same sid before this exit fires.
     const own = sessions.get(sid) === sess // false once closeWork/kill dropped it first
-    if (own) sessions.delete(sid)
+    if (own) {
+      sessions.delete(sid)
+      // Its MCP sessions end with it; a respawn mints a fresh token.
+      for (const [t, v] of mcpTokens) if (v.caller === sid) revokeMcpToken(t)
+    }
     const w = [...bus.workers.values()].find((x) => x.sid === sid)
     if (w && !['done', 'blocked', 'error'].includes(w.status)) { w.status = exitCode ? 'error' : 'exited'; w.updatedAt = Date.now(); saveWorkers(); pushSpaces() }
     // Worker hooks post under the workId, so a worker's sid only enters sessionStatus
@@ -2008,19 +2393,22 @@ function attach(ws, sid, cwd, kind, cid) {
   let sess = sessions.get(sid)
   if (!sess) {
     // The first attach of a tab open_tab created binds it and starts it on its prompt.
-    const link = tabLinks.get(sid.split(':')[1])
+    // So does a tab with a pending launch (its command or prompt), which this spawn consumes.
+    const tabId = sid.split(':')[1]
+    const link = tabLinks.get(tabId)
     const launch = link && !link.sid && link.kind === kind ? link : null
     if (launch) launch.sid = sid
-    const { file, args } = fileArgsFor(kind, sid, cwd, launch?.prompt)
-    try { sess = spawnSession(sid, cwd, file, args, kind) }
+    const pend = pendingLaunches.get(tabId), pl = pend?.kind === kind ? pend : null
+    if (pl) pendingLaunches.delete(tabId)
+    const { file, args, env } = fileArgsFor(kind, sid, cwd, launch?.prompt ?? pl?.prompt)
+    try { sess = spawnSession(sid, cwd, file, args, kind, env) }
     catch (err) {
       try { ws.send(JSON.stringify({ t: 'o', d: `\r\n[cockpit: failed to spawn ${file} — ${err.message}]\r\n` })) } catch {}
+      try { ws.send(JSON.stringify({ t: 'fatal', reason: `failed to spawn ${file}` })) } catch {}
       return ws.close()
     }
-    const run = kind === 'shell' && pendingRuns.get(sid.split(':')[1])
-    if (run) {
-      pendingRuns.delete(sid.split(':')[1])
-      const s = sess, sub = s.term.onData(() => { sub.dispose(); setTimeout(() => { try { s.term.write(run + '\r') } catch {} }, 150) })
+    if (pl?.command) {
+      const s = sess, sub = s.term.onData(() => { sub.dispose(); setTimeout(() => { try { s.term.write(pl.command + '\r') } catch {} }, 150) })
     }
   }
 
@@ -2037,14 +2425,18 @@ function attach(ws, sid, cwd, kind, cid) {
   // width change makes claude clear and redraw the whole frame.
   // A pane (cid) numbers its input frames and resends unanswered ones on a new
   // socket, so a frame numbered at or below the last one written is a duplicate.
-  // A ping is answered at once: it tells the pane its socket is alive.
+  // A ping is answered at once, after the input frames before it: the pong tells the
+  // pane those frames were written. A refused socket gets a 'fatal' frame first, so
+  // the pane stops retrying.
   let redrawn = sess.kind === 'shell' || sess.kind === 'codex'
   ws.on('message', (raw) => {
     let m
     try { m = JSON.parse(raw) } catch { return }
+    if (!isObj(m)) return
     if (m.t === 'i') {
       if (cid && m.n > 0) { if (m.n <= (sess.seen.get(cid) || 0)) return; sess.seen.set(cid, m.n) }
-      sess.term.write(m.d)
+      if (sid === 'orch:main') orchInputAt = Date.now()
+      if (typeof m.d === 'string') sess.term.write(m.d)
     }
     else if (m.t === 'ping') { try { ws.send('{"t":"pong"}') } catch {} }
     else if (m.t === 'r' && m.cols > 0 && m.rows > 0) {
@@ -2055,7 +2447,7 @@ function attach(ws, sid, cwd, kind, cid) {
         setTimeout(() => { try { sess.term.resize(sess.size.cols, sess.size.rows) } catch {} }, 80)
       } else { try { sess.term.resize(m.cols, m.rows) } catch {} }
     }
-    else if (m.t === 'kill') { try { sess.term.kill() } catch {}; sessions.delete(sid) }
+    else if (m.t === 'kill') { try { sess.term.kill() } catch {}; if (sessions.get(sid) === sess) sessions.delete(sid) }
     else if (m.t === 'scheme' && (m.v === 'light' || m.v === 'dark')) uiScheme = m.v
   })
   ws.on('close', () => { sess.clients.delete(ws); if (!sess.clients.size) sess.detachedAt = Date.now() })
@@ -2075,15 +2467,19 @@ async function dispatch({ agent, repo, ticket, branch, prompt, model }) {
   // branch, so a planner's scratch worktree is obviously a planner's, not just
   // the ticket. Story-workers pass their real branch, so it's used as-is.
   const br = String(branch || (ticket ? `${agent || 'work'}-${ticket}` : `${agent || 'work'}-${Date.now().toString(36)}`))
-  // A branch that already has a worktree reuses it when nothing else is in it: not a
-  // live worker's, and no uncommitted changes. Otherwise say why, never clobber it.
-  const existing = (await listWorktrees(r)).find((w) => w.branch === br)
+  if (br.startsWith('-')) return { error: 'a branch name must not start with -' }
+  // A branch that already has a worktree (never the main checkout) reuses it when nothing
+  // else is in it: not a live worker's, and no uncommitted changes. Otherwise say why,
+  // never clobber it. A reused worktree is fetched and fast-forwarded when strictly behind.
+  const existing = (await listWorktrees(r)).find((w) => w.branch === br && !w.isMain)
+  let sync = null
   if (existing) {
-    const owner = workerList().find((w) => normalize(w.cwd) === normalize(existing.path) && !['done', 'blocked', 'error', 'exited'].includes(w.status))
+    const owner = workerList().find((w) => samePath(w.cwd, existing.path) && isLive(w))
     if (owner) return { error: `worker ${owner.workId} (${owner.agent}) is live in ${existing.path} — send it the follow-up with SendMessage instead of dispatching` }
     const st = await runGit(existing.path, ['status', '--porcelain'])
     if (!st.ok || st.out.trim()) return { error: `${existing.path} has uncommitted changes — surface it to the user rather than dispatching over it` }
     try { unlinkSync(join(existing.path, REPORT_FILE)) } catch {} // the last worker's report would read as this one's
+    sync = await syncWorktree(existing.path, br)
   }
   const wt = existing ? { path: existing.path } : await createWorktree(r, br)
   if (wt.error) return { error: wt.error + (/already exists/.test(wt.error) ? ' — a leftover folder, not a registered worktree: ask the user to remove it, never delete it yourself' : '') }
@@ -2095,19 +2491,51 @@ async function dispatch({ agent, repo, ticket, branch, prompt, model }) {
   const wmodel = workerModelFor(def, model)
   // A reviewer runs the project's review command, whatever the loop's prompt says.
   if (def?.name === 'reviewer') prompt = `${String(prompt || '').trim()}\n\nReview command for this project: ${r.reviewCommand || DEFAULT_REVIEW_COMMAND}`.trim()
-  const args = ['--session-id', sessionId, '--mcp-config', mcpConfig('worker', sid), '--model', wmodel, '--permission-mode', cfg('workerPermission'), '--settings', sessionSettings(workId), ...(def ? agentArgs(def) : []), '--append-system-prompt', workerPreamble(workId), String(prompt || 'Begin your assigned task.')]
-  try { spawnSession(sid, wt.path, 'claude', args, 'worker') }
+  const lim = agentLimits(agent)
+  const args = ['--session-id', sessionId, '--mcp-config', mcpConfig('worker', sid), '--model', wmodel, '--permission-mode', cfg('workerPermission'), '--settings', sessionSettings(workId, lim.deny), ...(def ? agentArgs(def) : []), '--append-system-prompt', workerPreamble(workId), String(prompt || 'Begin your assigned task.')]
+  try { spawnSession(sid, wt.path, 'claude', args, 'worker', lim.env) }
   catch (err) {
-    // Don't leave the just-created worktree orphaned (no bus entry → uncloseable).
-    dynRoots.delete(normalize(wt.path))
-    await removeWorktree(r, wt.path, true)
+    // Don't leave a worktree this dispatch created orphaned (no bus entry → uncloseable); a reused one stays.
+    if (!existing) { dynRoots.delete(normalize(wt.path)); await removeWorktree(r, wt.path, true) }
     return { error: 'spawn failed: ' + err.message }
+  }
+  // One record per worktree: the new worker replaces any finished one there. Its session
+  // ends, and a report the loop hasn't drained moves to the inbox.
+  if (existing) for (const [id, w] of bus.workers) {
+    if (!samePath(w.cwd, wt.path)) continue
+    const old = sessions.get(w.sid)
+    if (old) { try { old.term.kill() } catch {}; sessions.delete(w.sid) }
+    if (w.report && !w.ackedAt) bus.inbox.push(w.report)
+    forgetSession(w.sid, w.workId)
+    bus.workers.delete(id)
   }
   const rec = { workId, sid, sessionId, agent: agent || 'worker', model: wmodel, repo: r.id, repoSlug: r.slug, ticket: ticket || null, branch: br, cwd: wt.path, status: 'working', summary: null, pr: null, createdAt: Date.now(), updatedAt: Date.now() }
   bus.workers.set(workId, rec)
   saveWorkers()
   pushSpaces()
-  return { workId, sid, cwd: wt.path, branch: br }
+  return { workId, sid, cwd: wt.path, branch: br, ...(existing ? { reused: true, ...sync } : {}) }
+}
+
+// { path } of the main checkout a worktree belongs to, from git; null when git can't say.
+// A worktree already gone counts as its own (removeWorktree then just reports it done).
+async function repoOfWorktree(cwd) {
+  if (!existsSync(cwd)) return { path: cwd }
+  const r = await runGit(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+  return r.ok ? { path: dirname(r.out.trim()) } : null
+}
+
+const isLive = (w) => !['done', 'blocked', 'error', 'exited'].includes(w.status)
+// Bring a clean reused worktree up to date: fetch its branch and fast-forward when it is
+// strictly behind origin. { ahead, behind } against origin afterwards (null when origin has
+// no such branch or the fetch failed, with fetchError), plus fastForwarded when it moved.
+async function syncWorktree(path, branch) {
+  const f = await runGit(path, ['fetch', '--', 'origin', branch], 60000)
+  if (!f.ok) return { ahead: null, behind: null, fetchError: lastLine(f.err || 'fetch failed') }
+  const c = await runGit(path, ['rev-list', '--left-right', '--count', `HEAD...refs/remotes/origin/${branch}`])
+  if (!c.ok) return { ahead: null, behind: null }
+  const [ahead, behind] = c.out.trim().split(/\s+/).map(Number)
+  if (behind && !ahead && (await runGit(path, ['merge', '--ff-only', '--quiet', `refs/remotes/origin/${branch}`], 60000)).ok) return { ahead, behind: 0, fastForwarded: behind }
+  return { ahead, behind }
 }
 
 // Close a dispatched worker: end its session, optionally remove its worktree,
@@ -2115,15 +2543,20 @@ async function dispatch({ agent, repo, ticket, branch, prompt, model }) {
 async function closeWork(workId, { removeWorktree: rm, force } = {}) {
   const w = bus.workers.get(workId)
   if (!w) return { error: 'unknown workId' }
+  if (rm) {
+    const other = workerList().find((x) => x !== w && isLive(x) && samePath(x.cwd, w.cwd))
+    if (other) return { error: `worker ${other.workId} is live in ${w.cwd} — close it first, or close this one without removing the worktree` }
+  }
   const s = sessions.get(w.sid)
   if (s) { try { s.term.kill() } catch {}; sessions.delete(w.sid) }
+  endBackgroundSessions(w.workId)
   if (rm) {
-    const repo = REPOS.find((r) => r.id === w.repo)
-    if (repo) {
-      const r = await removeWorktree(repo, w.cwd, !!force)
-      if (r.error) { w.status = 'exited'; saveWorkers(); pushSpaces(); return { error: r.error } } // e.g. dirty — keep the entry so the user can force
-    }
+    // A project deleted since the dispatch: the worktree still knows its own repo.
+    const repo = REPOS.find((r) => r.id === w.repo) || await repoOfWorktree(w.cwd)
+    const r = repo ? await removeWorktree(repo, w.cwd, !!force) : { error: `${w.cwd} is not a git worktree any more — remove it by hand` }
+    if (r.error) { w.status = 'exited'; saveWorkers(); pushSpaces(); return { error: r.error } } // e.g. dirty — keep the entry so the user can force
   }
+  forgetSession(w.sid, w.workId)
   bus.workers.delete(workId)
   saveWorkers()
   pushSpaces()
@@ -2143,7 +2576,7 @@ function restartOrchestrator() {
   sessions.delete('orch:main')
   try { old.term.kill() } catch {}
   setOrchSessionId(randomUUID())
-  orchStatus = 'working'; orchIdleSince = 0; lastCompactAt = 0
+  orchStatus = 'working'; orchIdleSince = 0; lastCompactAt = 0; nudgedTick = null
   lastContext = { ...lastContext, pct: null, used: 0, sessionId: ORCH_SESSION_ID, status: orchStatus, updatedAt: Date.now() }
   pushContext()
   const { file, args } = fileArgsFor('orch', 'orch:main', NEUTRAL)
@@ -2151,23 +2584,43 @@ function restartOrchestrator() {
   return { ok: true }
 }
 
-// Auto-compact: once the orchestrator has sat idle between ticks for a while, no
-// dispatched worker is still running (a report it's waiting on could land mid-
-// compact) and context is at or above compactPct, type /compact. Claude takes a
-// burst of input as a paste, so Enter goes separately.
+// Auto-compact: once the orchestrator has sat idle between ticks for a while, the user
+// hasn't typed into it for as long, no dispatched worker is still running (a report it's
+// waiting on could land mid-compact) and context is at or above compactPct, type
+// /compact. Claude takes a burst of input as a paste, so Enter goes separately.
 const COMPACT_IDLE_MS = 2 * 60e3, COMPACT_COOLDOWN_MS = 10 * 60e3
 let orchIdleSince = 0, lastCompactAt = 0
+// Bumped on every compaction (this auto-compact, or the PreCompact hook), so tick_snapshot
+// knows a delta against an earlier snapshot is no longer held by the orchestrator.
+let compactGen = 0
+let orchInputAt = 0 // when a browser last typed into the orchestrator
 const COMPACT_FOCUS = 'Keep: you are the Jeeves orchestrator running a self-paced /loop; the BRIEF rules; every open ticket, PR and dispatched worker with its status; anything waiting on the user. On the next tick, re-read BRIEF.md and state.md.'
 setInterval(() => {
   const pct = cfg('compactPct'), sess = sessions.get('orch:main')
   if (!pct || !sess || orchStatus !== 'idle' || !orchIdleSince) return
   const now = Date.now()
-  if (now - orchIdleSince < COMPACT_IDLE_MS || now - lastCompactAt < COMPACT_COOLDOWN_MS) return
+  if (now - orchIdleSince < COMPACT_IDLE_MS || now - orchInputAt < COMPACT_IDLE_MS || now - lastCompactAt < COMPACT_COOLDOWN_MS) return
   if ((readOrchContext().pct ?? 0) < pct) return
-  if (workerList().some((w) => !['done', 'blocked', 'error', 'exited'].includes(w.status))) return
-  lastCompactAt = now
+  if (workerList().some(isLive)) return
+  lastCompactAt = now; compactGen++
   try { sess.term.write('/compact ' + COMPACT_FOCUS); setTimeout(() => { try { sess.term.write('\r') } catch {} }, 150) } catch {}
 }, 30e3).unref()
+
+// Self-heal a stalled loop (orchStalled: it ended a turn without scheduling its next tick):
+// type one nudge into the orchestrator, once per stall — until it ticks again or restarts.
+// A stall that outlasts the nudge is left to the UI's alert. Checked every 5 s, and the UI
+// told whenever the verdict changes.
+const STALL_NUDGE = 'Your loop has no wakeup scheduled. Run the next tick now and end it with ScheduleWakeup.'
+let nudgedTick = null, wasStalled = false
+function checkStall() {
+  const stalled = orchStalled(), sess = sessions.get('orch:main')
+  if (stalled !== wasStalled) { wasStalled = stalled; pushContext() }
+  if (stalled && sess && nudgedTick !== lastTickAt) {
+    nudgedTick = lastTickAt
+    try { sess.term.write(STALL_NUDGE); setTimeout(() => { try { sess.term.write('\r') } catch {} }, 150) } catch {}
+  }
+}
+setInterval(checkStall, 5000).unref()
 
 // ── Dashboard surface merge ──────────────────────────────────────────────────
 // Row identity: "<repo>#<number>" for PR sections, "<repo>:<KEY>" for Jira ones,
@@ -2242,7 +2695,7 @@ function buildMcpServer(role, caller) {
     label: z.string().describe('Short menu label, e.g. "Plan", "Resolve", "Approve", "Test", "View plan".'),
     run: z.string().optional().describe('Exact launcher reply, e.g. "plan ABC-5830", "review 1860", "qa 3". Omit for a link action.'),
     type: z.boolean().optional().describe('True = type into the composer without submitting, for a reply the user must complete first.'),
-    href: z.string().optional().describe('A URL to OPEN IN A NEW TAB instead of running a launcher — e.g. a published plan\'s Confluence link on a Story row. Set href OR run, not both.')
+    href: z.string().regex(/^https?:\/\//i, 'href must be an http(s) URL').optional().describe('A URL to OPEN IN A NEW TAB instead of running a launcher — e.g. a published plan\'s Confluence link on a Story row. Set href OR run, not both.')
   })
   // Row schemas, shared by the full-section and `upsert` forms of surface_render.
   const rowSchemas = {
@@ -2312,7 +2765,7 @@ function buildMcpServer(role, caller) {
     ...custom.map((a) => `- ${a.name} (custom) — ${a.description}`)
   ].join('\n')
   if (full) srv.registerTool('dispatch', {
-    description: 'Dispatch a unit of work to a separate worker session (a new cockpit space) in a fresh worktree. Returns a workId. The worker reports back via the "report" tool; drain results with "inbox". Use this — never the Agent/Task tool — for every agent run while the cockpit is up, ad-hoc asks included.\n'
+    description: 'Dispatch a unit of work to a separate worker session (a new cockpit space) in a fresh worktree. Returns a workId. A branch whose worktree already exists, clean and with no live worker, is reused: the result then carries reused: true and ahead / behind against origin (fetched, and fast-forwarded when only behind — fastForwarded: n); tell the worker it continues existing work, and say so when ahead and behind are both non-zero. The worker reports back via the "report" tool; drain results with "inbox". Use this — never the Agent/Task tool — for every agent run while the cockpit is up, ad-hoc asks included.\n'
       + 'When `agent` names one of these agents, the session runs as it (its prompt, tools and model) — the prompt carries only the task:\n'
       + roster + '\n'
       + 'Any other `agent` is a label: compose the full prompt yourself (role + task).',
@@ -2340,6 +2793,8 @@ function buildMcpServer(role, caller) {
       threads: z.string().optional().describe('For a resolver: thread-id → disposition map, as text.')
     }
   }, async (rp) => {
+    // A worker reports only as itself: its token's caller is its own sid.
+    if (role === 'worker' && caller !== 'work:' + rp.workId) return { content: [{ type: 'text', text: `refused: you are ${caller}, not work:${rp.workId} — report under your own workId` }], isError: true }
     const w = bus.workers.get(rp.workId)
     const entry = { ...rp, at: Date.now() }
     if (w) {
@@ -2372,16 +2827,16 @@ function buildMcpServer(role, caller) {
   })
 
   if (full) srv.registerTool('write_state', {
-    description: "Persist a project's state.md (your per-tick memory), or with file: 'reminders' the data home's reminders.md, by passing the FULL new contents. Use this instead of the Edit/Write tool so the user's terminal isn't filled with state diffs — it writes the file server-side.",
+    description: "Persist a project's state.md (your per-tick memory), or with file: 'reminders' the data home's reminders.md, or with file: 'daily' its daily.md, by passing the FULL new contents. Use this instead of the Edit/Write tool so the user's terminal isn't filled with state diffs — it writes the file server-side.",
     inputSchema: {
-      project: z.string().optional().describe("Project id — the projects/<id> folder name. Required unless file is 'reminders'."),
-      file: z.enum(['state', 'reminders']).optional().describe("'state' (default) = projects/<id>/state.md; 'reminders' = <data-home>/reminders.md."),
+      project: z.string().optional().describe("Project id — the projects/<id> folder name. Required when file is 'state'."),
+      file: z.enum(['state', 'reminders', 'daily']).optional().describe("'state' (default) = projects/<id>/state.md; 'reminders' = <data-home>/reminders.md; 'daily' = <data-home>/daily.md."),
       markdown: z.string().describe('The complete new contents of the file.')
     }
-  }, async ({ project, file, markdown }) => {
-    const reminders = file === 'reminders'
-    if (!reminders && !REPOS.find((r) => r.id === project)) return { content: [{ type: 'text', text: 'unknown project: ' + project }], isError: true }
-    try { await writeFile(reminders ? join(NEUTRAL, 'reminders.md') : join(NEUTRAL, 'projects', project, 'state.md'), String(markdown)) }
+  }, async ({ project, file = 'state', markdown }) => {
+    if (file === 'state' && !REPOS.find((r) => r.id === project)) return { content: [{ type: 'text', text: 'unknown project: ' + project }], isError: true }
+    const path = file === 'reminders' ? REMINDERS_FILE : file === 'daily' ? join(NEUTRAL, 'daily.md') : join(NEUTRAL, 'projects', project, 'state.md')
+    try { await withLock(path, () => atomicWrite(path, String(markdown))) }
     catch (e) { return { content: [{ type: 'text', text: 'write failed: ' + e.message }], isError: true } }
     return { content: [{ type: 'text', text: 'state saved' }] }
   })
@@ -2405,6 +2860,7 @@ function buildMcpServer(role, caller) {
     if (!/^[A-Za-z0-9._-]+$/.test(id) || id.startsWith('.')) return bad('invalid project id: ' + a.id)
     const dir = join(NEUTRAL, 'projects', id)
     if (existsSync(join(dir, 'project.md'))) return bad('project already exists: ' + id)
+    if (a.baseBranch && String(a.baseBranch).trim().startsWith('-')) return bad('baseBranch must not start with -')
     const prose = [
       `# Project: ${id}`, '',
       '## Identity',
@@ -2417,7 +2873,7 @@ function buildMcpServer(role, caller) {
     const fm = {}
     if (a.reviewCommand) fm.reviewCommand = String(a.reviewCommand).trim()
     if (a.seedFiles?.length) fm.seedFiles = a.seedFiles.map(String).map((s) => s.trim()).filter(Boolean).join(', ')
-    try { mkdirSync(dir, { recursive: true }); await writeFile(join(dir, 'project.md'), writeFrontmatter(prose, fm)) }
+    try { mkdirSync(dir, { recursive: true }); atomicWrite(join(dir, 'project.md'), writeFrontmatter(prose, fm)) }
     catch (e) { return bad('write failed: ' + e.message) }
     const rec = repoFromDir(id)
     if (!rec) return bad('created project.md but it is not usable — check repo/path')
@@ -2455,7 +2911,7 @@ function buildMcpServer(role, caller) {
   })
 
   if (full) srv.registerTool('open_space', {
-    description: 'Open a cockpit space for the user — a terminal in a worktree, or in any folder. Give the repo plus ONE of: branch (local or origin; reused if a worktree already has it, else created), pr (its head branch is opened), or path (an existing worktree). Omit all three for the repo\'s main checkout. Omit repo and give only path for a folder space — any folder under the home dir, for questions that aren\'t about a configured repo. This is for spaces the USER investigates; dispatched work still goes through dispatch.',
+    description: 'Open a cockpit space for the user — a terminal in a worktree, or in any folder. Give the repo plus ONE of: branch (local or origin; reused if a worktree already has it, else created), pr (its head branch is opened), or path (an existing worktree). Omit all three for the repo\'s main checkout. Omit repo and give only path for a folder space — any folder under the home dir, for questions that aren\'t about a configured repo. This is for spaces the USER investigates; dispatched work still goes through dispatch. Returns spaceRef (for add_tab / close_space) and the first tab\'s tabRef (for close_tab).',
     inputSchema: {
       repo: z.string().optional().describe('Repo id or slug. Omit, with a path, for a folder space.'),
       branch: z.string().optional().describe('Branch to open — local or an origin branch (checked out into a tracking branch).'),
@@ -2498,25 +2954,45 @@ function buildMcpServer(role, caller) {
     dynRoots.add(normalize(cwd))
     const spaceRef = 'os' + randomBytes(3).toString('hex')
     const kind = a.command ? 'shell' : a.tab || 'claude', tab = { id: randomBytes(3).toString('hex'), kind }
-    if (a.command) pendingRuns.set(tab.id, a.command)
+    if (a.command) { pendingLaunches.set(tab.id, { kind, command: a.command, at: Date.now() }); logUserRun('open_space', a.command) }
+    addOrchTab({ tabRef: tab.id, space: spaceRef, kind, ...(a.command ? { command: a.command } : {}) })
     broadcast({ t: 'open_space', cmd: { id: spaceRef, repoId: r?.id ?? '', cwd, label, kind, tab } })
-    return { content: [{ type: 'text', text: `opening space “${label}” → ${cwd} (spaceRef: ${spaceRef})` }], structuredContent: { spaceRef, cwd, label } }
+    return { content: [{ type: 'text', text: `opening space “${label}” → ${cwd} (spaceRef: ${spaceRef}, tabRef: ${tab.id})` }], structuredContent: { spaceRef, tabRef: tab.id, cwd, label } }
   })
 
   if (full) srv.registerTool('add_tab', {
-    description: 'Add a tab to a space you already opened with open_space. Pass the spaceRef that open_space returned.',
+    description: 'Add a tab to a space you opened with open_space (pass its spaceRef), or to the Scratchpad (space: "scratch"). A claude tab can start on a prompt (e.g. "/jeeves:setup --scan"); a shell tab on a command. Returns the tabRef close_tab takes.',
     inputSchema: {
-      spaceRef: z.string().describe('The spaceRef returned by open_space.'),
+      spaceRef: z.string().optional().describe('The spaceRef returned by open_space. Give this or space.'),
+      space: z.literal('scratch').optional().describe('"scratch" = the Scratchpad. Give this or spaceRef.'),
       tab: z.enum(['claude', 'shell', 'codex']).optional().describe('Kind of the new tab (default claude; shell when command is given).'),
+      prompt: z.string().optional().describe(`The first message a claude tab starts on (up to ${MAX_TAB_PROMPT} characters).`),
       command: z.string().optional().describe('A shell command the new tab starts running, for the USER — e.g. a dev server or a build. Opens a shell tab.')
     }
-  }, async ({ spaceRef, tab, command }) => {
-    if (!hasBrowser()) return bad('no cockpit browser tab is connected — cannot add a tab')
+  }, async ({ spaceRef, space, tab, prompt, command }) => {
+    if (!spaceRef === !space) return bad('give spaceRef (a space you opened) or space: "scratch", not both')
     if (command && tab && tab !== 'shell') return bad('command runs in a shell tab — drop tab or pass tab: "shell"')
-    const kind = command ? 'shell' : tab || 'claude', t = { id: randomBytes(3).toString('hex'), kind }
-    if (command) pendingRuns.set(t.id, command)
-    broadcast({ t: 'add_tab', spaceRef, kind, tab: t })
-    return ok(`adding ${kind} tab to ${spaceRef}${command ? ' running: ' + command : ''}`)
+    const kind = command ? 'shell' : tab || 'claude'
+    if (prompt != null && kind !== 'claude') return bad('prompt starts a claude tab — drop command, and tab or pass tab: "claude"')
+    if (prompt != null && (!prompt.trim() || prompt.length > MAX_TAB_PROMPT)) return bad(`prompt must be 1–${MAX_TAB_PROMPT} characters`)
+    if (!hasBrowser()) return bad('no cockpit browser tab is connected — cannot add a tab')
+    const t = { id: randomBytes(3).toString('hex'), kind }
+    if (command) { pendingLaunches.set(t.id, { kind, command, at: Date.now() }); logUserRun('add_tab', command) }
+    if (prompt != null) pendingLaunches.set(t.id, { kind, prompt, at: Date.now() })
+    addOrchTab({ tabRef: t.id, space: space ? 'scratch' : spaceRef, kind, ...(prompt != null ? { prompt } : {}), ...(command ? { command } : {}) })
+    broadcast({ t: 'add_tab', ...(space ? { spaceId: 'scratch' } : { spaceRef }), kind, tab: t })
+    return { content: [{ type: 'text', text: `adding ${kind} tab ${t.id} to ${space ? 'the Scratchpad' : spaceRef}${command ? ' running: ' + command : ''}` }], structuredContent: { tabRef: t.id } }
+  })
+
+  if (full) srv.registerTool('close_tab', {
+    description: 'Close a tab you opened (open_space\'s first tab, or add_tab): ends its session and removes it from every browser. Close one once its job is visibly done — never while it is waiting on the user.',
+    inputSchema: { tabRef: z.string().describe('The tabRef open_space or add_tab returned.') }
+  }, async ({ tabRef }) => {
+    if (!orchTabs.has(tabRef)) return bad(`tab ${tabRef} isn't one you opened — only tabs from open_space and add_tab can be closed`)
+    for (const sid of [...sessions.keys()]) if (sid.endsWith(':' + tabRef)) closeSession(sid)
+    pendingLaunches.delete(tabRef); dropOrchTab(tabRef)
+    broadcast({ t: 'close_tab', tabId: tabRef })
+    return ok(`closed tab ${tabRef}`)
   })
 
   if (full) srv.registerTool('close_space', {
@@ -2605,8 +3081,10 @@ function buildMcpServer(role, caller) {
     return ok(`sent to ${tabRef} — call wait_tab for its answer`)
   })
 
-  // The last complete tick this MCP session saw, for the next delta. A restarted
-  // orchestrator connects a new session, so its first call is always whole.
+  // The last complete tick this MCP session saw, for the next delta, with the compact
+  // generation it was taken in: after a /compact the orchestrator no longer holds it, so
+  // the next call is whole. A restarted orchestrator connects a new session, so its first
+  // call is always whole.
   let prevTick = null
   if (full) srv.registerTool('tick_snapshot', {
     description: 'Run the tick\'s GitHub query (BRIEF *Each tick* step 1) server-side from the project index and return its PRs per project, plus the exact Jira call(s) for step 2. Compact JSON:\n'
@@ -2615,17 +3093,27 @@ function buildMcpServer(role, caller) {
       + '- `jira: [{ args, qaColumns? }]`: pass each `args` as-is to Atlassian Rovo searchJiraIssuesUsingJql (page with nextPageToken); qaColumns are that call\'s QA columns, for colouring QA rows.\n'
       + '- `incomplete: { <alias>: reason }` with whole `projects`: a later page failed, so those searches are cut short — do not resolve rows missing from them. The next call deltas against the last complete one.\n'
       + '- `{ error, jira }`: gh is missing, unauthenticated or the query failed — run the Jira call(s) anyway and report GitHub as unavailable.\n'
+      + '- With full: true, also `index: [{ id, repo, path, jiraKey, baseBranch, repoWide, jiraOverride }]` (the projects; repoWide = reviews every teammate PR, jiraOverride = sets its own Jira site or QA fields), `ledgers: { <project id>: { ledger: true, rows: [{ kind, id, state, next, since, extra }] } | { ledger: false, raw } }` (each state.md parsed), and `agents: [{ name, description }]` (what dispatch can run).\n'
       + 'Pass full: true after a /compact or whenever you do not hold the last result.',
-    inputSchema: { full: z.boolean().optional().describe('Return every PR, not a delta.') }
+    inputSchema: { full: z.boolean().optional().describe('Return every PR, not a delta, plus the project index, ledgers and agents.') }
   }, async ({ full: whole } = {}) => {
     markTick()
-    const { out, snap } = await tickSnapshot(whole ? null : prevTick)
-    if (snap) prevTick = snap
+    rescanRepos()
+    const gen = compactGen
+    const { out, snap } = await tickSnapshot(whole || prevTick?.gen !== gen ? null : prevTick.snap)
+    if (snap) prevTick = { snap, gen }
+    if (whole) {
+      out.index = REPOS.map((r) => ({ id: r.id, repo: r.slug, path: r.path, jiraKey: r.jiraKey || null, baseBranch: r.baseBranch || null, repoWide: repoWide(r.id), jiraOverride: jiraOverride(r.id) }))
+      out.ledgers = Object.fromEntries(REPOS.map((r) => [r.id, parseLedger(readMd(join(NEUTRAL, 'projects', r.id, 'state.md')))]))
+      const { builtin, custom } = agentsView()
+      out.agents = [...builtin.map((a) => ({ name: a.name, description: (a.override || a).description })), ...custom.map((a) => ({ name: a.name, description: a.description }))]
+    }
     return { content: [{ type: 'text', text: JSON.stringify(out) }], isError: !!out.error }
   })
 
   if (full) srv.registerTool('inbox', {
-    description: 'Drain pending worker reports (returns them and marks them acknowledged). Call once per tick; then post to GitHub yourself and update state.md. Reports are reconciled from the persisted worker records, so one survives a server restart until you drain it.',
+    description: 'Drain pending worker reports (returns them and marks them acknowledged). Call once per tick; then post to GitHub yourself and update state.md. Reports are reconciled from the persisted worker records, so one survives a server restart until you drain it.\n'
+      + 'Returns { reports, tabs }. `tabs` are the tabs you opened (open_space, add_tab) and haven\'t closed: { tabRef, space ("scratch" or a spaceRef), kind, prompt?, command?, openedAt, status (working / awaiting / idle / exited / running / not started) } — close each with close_tab once its job is visibly done, never while it is waiting on the user.',
     inputSchema: { peek: z.boolean().optional().describe('Return without acknowledging.') }
   }, async ({ peek }) => {
     markTick()
@@ -2640,24 +3128,139 @@ function buildMcpServer(role, caller) {
       if (pending.length) saveWorkers()
       bus.inbox = []
     }
-    return { content: [{ type: 'text', text: JSON.stringify(reports) }], structuredContent: { reports } }
+    const tabs = [...orchTabs.values()].map(orchTabView)
+    return { content: [{ type: 'text', text: JSON.stringify({ reports, tabs }) }], structuredContent: { reports, tabs } }
+  })
+
+  // ── Status reads and the loop's bookkeeping, typed — the orchestrator has no shell ──
+  const ro = { readOnlyHint: true }
+  const result = (out) => (out.error ? bad(out.error) : ok(out.text ?? JSON.stringify(out)))
+  if (full) srv.registerTool('github_read', {
+    description: 'Read GitHub status through gh — never a shell. Output past 20000 characters comes back as { text: <the first 20000>, total, truncated: true }. No value may start with -.\n'
+      + '- pr: one PR (number) — number, title, state, isDraft, author, headRefName, baseRefName, headRefOid, mergedAt, closedAt, mergeable, mergeStateStatus, statusCheckRollup, reviews, latestReviews, reviewRequests, body, url.\n'
+      + '- checks: a PR\'s checks (number) — name, state, bucket (pass/fail/pending/skipping/cancel), workflow, link, startedAt, completedAt.\n'
+      + '- prs: a repo\'s PRs, filtered by head (branch), state (open/closed/merged/all), query (a search string) and limit.\n'
+      + '- search: gh search prs over query (GitHub search syntax), optionally within repo, with state and limit.\n'
+      + '- runs: workflow runs, optionally for head (branch), with limit. run: one run (number = run id) — status, conclusion, jobs; never logs.\n'
+      + '- commits: a PR\'s commits (number), oldest first — [{ sha, author, subject, merge }], merge = more than one parent.\n'
+      + '- threads: a PR\'s review threads (number) — [{ id, isResolved, path, line, comments: [{ author, body }] }].\n'
+      + '- branches: branch names in repo matching query — [{ name, oid }].\n'
+      + '- graphql: run query (a GraphQL document) as-is; any mutation in it is refused.\n'
+      + 'jq, when given, is gh\'s own --jq filter over the output (not for commits, threads or branches, which have a fixed shape).',
+    annotations: ro,
+    inputSchema: {
+      kind: z.enum(['pr', 'checks', 'prs', 'search', 'runs', 'run', 'commits', 'threads', 'branches', 'graphql']),
+      repo: z.string().optional().describe('owner/name. Required except for search (optional there) and graphql.'),
+      number: z.union([z.string(), z.number()]).optional().describe('PR number (pr, checks, commits, threads) or run id (run).'),
+      query: z.string().optional().describe('prs: --search string; search: the search; branches: a branch-name match; graphql: the document.'),
+      head: z.string().optional().describe('prs: head branch; runs: branch.'),
+      state: z.string().optional().describe('prs: open / closed / merged / all; search: open / closed.'),
+      limit: z.number().optional().describe('prs, search, runs: at most this many (default 30, max 100).'),
+      jq: z.string().optional().describe('A jq filter gh applies to the output.')
+    }
+  }, async (a) => result(await githubRead(a)))
+
+  if (full) srv.registerTool('github_write', {
+    description: 'The loop\'s only GitHub writes, on the user\'s OWN PRs (author = your gh login) and nothing else:\n'
+      + '- retitle { repo, number, key }: prefix a non-draft PR\'s title with "[KEY] " (a no-op, unchanged: true, when it already starts with the key).\n'
+      + '- reply_thread { threadId, body, resolve? }: reply to a review thread, then resolve it when resolve is true. A thread already resolved is left alone (alreadyResolved: true).',
+    inputSchema: {
+      action: z.enum(['retitle', 'reply_thread']),
+      repo: z.string().optional().describe('retitle: owner/name.'),
+      number: z.union([z.string(), z.number()]).optional().describe('retitle: the PR number.'),
+      key: z.string().optional().describe('retitle: the Jira key, e.g. ABC-1234.'),
+      threadId: z.string().optional().describe('reply_thread: the review thread id (from github_read kind threads).'),
+      body: z.string().optional().describe('reply_thread: the reply.'),
+      resolve: z.boolean().optional().describe('reply_thread: resolve the thread after replying.')
+    }
+  }, async (a) => { const out = await githubWrite(a); return out.error ? bad(JSON.stringify(out)) : ok(JSON.stringify(out)) })
+
+  if (full) srv.registerTool('now', {
+    description: 'The time: { iso, local: "YYYY-MM-DD HH:MM" (this machine\'s zone), tz, offsetMinutes, nextTickSeconds (the gap to your next tick, from defaults.md), nextReminderDue? (the earliest reminder\'s due, local) }.',
+    annotations: ro,
+    inputSchema: {}
+  }, async () => {
+    const d = new Date()
+    const due = parseReminders(readMd(REMINDERS_FILE)).map((r) => r.due).sort()[0]
+    return ok(JSON.stringify({ iso: d.toISOString(), local: localStamp(d), tz: Intl.DateTimeFormat().resolvedOptions().timeZone, offsetMinutes: -d.getTimezoneOffset(), nextTickSeconds: Math.round(tickEveryMs() / 1000), ...(due ? { nextReminderDue: due } : {}) }))
+  })
+
+  if (full) srv.registerTool('open_url', {
+    description: 'Open an http(s) URL in the user\'s default browser on this machine.',
+    inputSchema: { url: z.string().describe('An http:// or https:// URL.') }
+  }, async ({ url }) => {
+    let u; try { u = new URL(url) } catch { return bad('not a URL: ' + url) }
+    if (!['http:', 'https:'].includes(u.protocol) || /[\s"]/.test(url)) return bad('only http(s) URLs open')
+    const out = await openInOs(u.href, 'url')
+    return out.error ? bad(out.error) : ok('opened ' + u.href)
+  })
+
+  if (full) srv.registerTool('read_spill', {
+    description: 'Read a slice of a tool result Claude Code spilled to a file (the "Output too large … saved to <path>" message) — only files in this session\'s own tool-results folder. Returns { text, offset, total, more }; call again at offset + text.length while more is true.',
+    annotations: ro,
+    inputSchema: {
+      path: z.string().describe('The spilled file\'s path, as the message gave it.'),
+      offset: z.number().optional().describe('Character to start at (default 0).'),
+      length: z.number().optional().describe('Characters to read (default and max 20000).')
+    }
+  }, async ({ path, offset = 0, length = GH_CAP }) => {
+    const dir = join(dirname(orchTranscriptPath()), ORCH_SESSION_ID, 'tool-results')
+    let root, file
+    try { root = realpathSync(dir) } catch { return bad('this session has no spilled tool results') }
+    try { file = realpathSync(resolve(dir, String(path))) } catch { return bad('no such file: ' + path) }
+    if (!fold(file).startsWith(fold(root) + sep)) return bad(`refused: only files in ${dir} are readable`)
+    let all; try { all = readFileSync(file, 'utf8') } catch (e) { return bad('read failed: ' + e.message) }
+    const from = Math.max(0, Math.floor(+offset) || 0), n = Math.min(Math.max(1, Math.floor(+length) || GH_CAP), GH_CAP)
+    const text = all.slice(from, from + n)
+    return ok(JSON.stringify({ text, offset: from, total: all.length, more: from + text.length < all.length }))
+  })
+
+  if (full) srv.registerTool('update_config', {
+    description: 'Change settings in defaults.md, identity.md or a project\'s project.md, in place (every other line kept). set: { field: value } (a list field takes an array); unset: [field] (a project field then inherits defaults.md). Fields — identity: ' + CONFIG_FIELDS.identity.map((f) => f.key).join(', ')
+      + '; project: ' + CONFIG_FIELDS.project.map((f) => f.key).join(', ') + '; defaults: ' + CONFIG_FIELDS.defaults.map((f) => f.key).join(', ') + '.',
+    inputSchema: {
+      file: z.enum(['identity', 'defaults', 'project']),
+      project: z.string().optional().describe('Project id, for file: project.'),
+      set: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional(),
+      unset: z.array(z.string()).optional()
+    }
+  }, async ({ file, project, set = {}, unset = [] }) => {
+    const out = await writeConfig({ file, project, set, unset })
+    return out.error ? bad(out.error) : ok(`updated ${file === 'project' ? project + '/project.md' : file + '.md'}`)
   })
 
   return srv
 }
 
+// Who an MCP bearer token is: a launched session's minted token (its role and sid), or the
+// browser token (the full tool set, no caller). null = refused.
+function mcpCaller(token) {
+  if (!token) return null
+  const m = mcpTokens.get(token)
+  if (m) return { ...m, token }
+  return sameToken(token, TOKEN) ? { role: null, caller: null, token } : null
+}
+// MCP session id → { transport, token, at }. A session is served only to the token that
+// opened it; it ends when that token is revoked (its PTY exited, a respawn, a rotation)
+// or after MCP_IDLE_MS unused — longer than the longest tick gap defaults.md allows.
 const mcpTransports = new Map()
-async function handleMcp(req, res) {
+const MCP_IDLE_MS = 25 * 3600e3
+async function handleMcp(req, res, who) {
   const sid = req.headers['mcp-session-id']
-  if (sid && mcpTransports.has(sid)) return mcpTransports.get(sid).handleRequest(req, res)
+  const known = sid && mcpTransports.get(sid)
+  if (known) {
+    if (known.token !== who.token) return sendJson(res, { error: 'unauthorized' }, 401)
+    known.at = Date.now()
+    return known.transport.handleRequest(req, res)
+  }
   if (req.method === 'POST') {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
-      onsessioninitialized: (id) => mcpTransports.set(id, transport)
+      onsessioninitialized: (id) => mcpTransports.set(id, { transport, token: who.token, at: Date.now() }),
+      enableDnsRebindingProtection: true, allowedHosts: LOCAL_HOSTS, allowedOrigins: LOCAL_HOSTS.map((h) => 'http://' + h)
     })
     transport.onclose = () => { if (transport.sessionId) mcpTransports.delete(transport.sessionId) }
-    const q = new URL(req.url, 'http://localhost').searchParams
-    try { await buildMcpServer(q.get('role'), q.get('sid')).connect(transport) } catch (err) { res.writeHead(500); return res.end(String(err?.message || err)) }
+    try { await buildMcpServer(who.role, who.caller).connect(transport) } catch (err) { res.writeHead(500); return res.end(String(err?.message || err)) }
     return transport.handleRequest(req, res)
   }
   res.writeHead(400, { 'content-type': 'application/json' })
@@ -2666,13 +3269,15 @@ async function handleMcp(req, res) {
 
 setInterval(() => {
   const now = Date.now()
+  for (const [id, l] of pendingLaunches) if (now - l.at > PENDING_LAUNCH_MS) pendingLaunches.delete(id)
+  for (const [id, m] of mcpTransports) if (now - m.at > MCP_IDLE_MS) { mcpTransports.delete(id); m.transport.close().catch(() => {}) }
   for (const [sid, s] of sessions) {
     // The orchestrator and dispatched workers are autonomous — they keep running
     // (and reporting) when the browser is closed, so the detach reaper skips them.
     // A detached user tab lives cfg('detachMinutes'); 0 = never reaped.
     const ttl = cfg('detachMinutes') * 60 * 1000
     if (sid === 'orch:main' || sid.startsWith('work:') || !ttl) continue
-    if (!s.clients.size && s.detachedAt && now - s.detachedAt > ttl) { try { s.term.kill() } catch {}; sessions.delete(sid) }
+    if (!s.clients.size && s.detachedAt && now - s.detachedAt > ttl) { try { s.term.kill() } catch {}; sessions.delete(sid); endBackgroundSessions(sid) }
   }
 }, 60 * 1000).unref()
 
@@ -2682,6 +3287,7 @@ const ptyWss = new WebSocketServer({ noServer: true })
 const eventsWss = new WebSocketServer({ noServer: true })
 server.on('upgrade', (req, socket, head) => {
   const { pathname } = new URL(req.url, 'http://localhost')
+  if (!localRequest(req)) { socket.end('HTTP/1.1 403 Forbidden\r\nconnection: close\r\n\r\n'); return }
   if (pathname === '/pty') ptyWss.handleUpgrade(req, socket, head, (ws) => ptyWss.emit('connection', ws, req))
   else if (pathname === '/events') eventsWss.handleUpgrade(req, socket, head, (ws) => eventsWss.emit('connection', ws, req))
   else socket.destroy()
@@ -2699,20 +3305,35 @@ setInterval(() => {
   }
 }, PTY_HB_MS).unref()
 
+// A /pty sid: `<space>:<tab>`, `work:<workId>`, `orch:main`, or a bare ephemeral id.
+const PTY_SID = /^[A-Za-z0-9_-]+(:[A-Za-z0-9_.-]+)?$/
+const PTY_KINDS = ['shell', 'claude', 'codex', 'orch', 'worker']
+// Why a /pty request may not run `kind` under `sid`, or null. The orchestrator runs only
+// as orch:main and orch:main only as the orchestrator; a worker only for a dispatched one.
+function ptyRefusal(sid, kind) {
+  if (!PTY_SID.test(sid)) return 'bad sid'
+  if (!PTY_KINDS.includes(kind)) return 'bad cmd'
+  if ((kind === 'orch') !== (sid === 'orch:main')) return 'orch runs only as orch:main'
+  if ((kind === 'worker') !== sid.startsWith('work:')) return 'a worker runs only as work:<id>'
+  if (kind === 'worker' && !workerList().some((w) => w.sid === sid)) return 'unknown worker'
+  return null
+}
 ptyWss.on('connection', (ws, req) => {
   ws.on('pong', () => { ws.alive = true })
   const url = new URL(req.url, 'http://localhost')
   const sid = url.searchParams.get('sid') || 'eph-' + Math.random().toString(36).slice(2)
   const cwd = url.searchParams.get('cwd') || NEUTRAL
   const kind = url.searchParams.get('cmd') || 'shell'
-  if (!authed(req, url)) {
-    try { ws.send(JSON.stringify({ t: 'o', d: '\r\n[cockpit: unauthorized — reopen via the token URL]\r\n' })) } catch {}
-    return ws.close()
+  const refuse = (text, reason) => {
+    try { ws.send(JSON.stringify({ t: 'o', d: `\r\n[cockpit: ${text}]\r\n` })) } catch {}
+    try { ws.send(JSON.stringify({ t: 'fatal', reason })) } catch {}
+    ws.close()
   }
-  if (!allowedCwd(cwd)) {
-    try { ws.send(JSON.stringify({ t: 'o', d: '\r\n[cockpit: cwd not allowed]\r\n' })) } catch {}
-    return ws.close()
-  }
+  if (!authed(req, url)) return refuse('unauthorized — reopen via the token URL', 'unauthorized')
+  ws.token = TOKEN
+  const why = ptyRefusal(sid, kind)
+  if (why) return refuse(why, why)
+  if (!allowedCwd(cwd)) return refuse('cwd not allowed', 'cwd not allowed')
   const scheme = url.searchParams.get('scheme')
   if (scheme === 'light' || scheme === 'dark') uiScheme = scheme
   attach(ws, sid, cwd, kind, url.searchParams.get('cid'))
@@ -2721,9 +3342,11 @@ ptyWss.on('connection', (ws, req) => {
 eventsWss.on('connection', (ws, req) => {
   const url = new URL(req.url, 'http://localhost')
   if (!authed(req, url)) return ws.close()
+  ws.token = TOKEN
   eventClients.add(ws)
-  // Prime the new client with the current picture.
+  // Prime the new client with the current picture, the layout too, so a reconnect resyncs.
   try { ws.send(JSON.stringify({ t: 'surface', payload: bus.surface })) } catch {}
+  if (layout) { try { ws.send(JSON.stringify({ t: 'layout', layout, from: '' })) } catch {} }
   try { ws.send(JSON.stringify({ t: 'spaces', spaces: workerList() })) } catch {}
   try { ws.send(JSON.stringify({ t: 'reminders', ...remindersView() })) } catch {}
   try { ws.send(JSON.stringify({ t: 'context', ctx: orchCtx(readOrchContext()) })) } catch {}
@@ -2760,10 +3383,30 @@ function loadPersisted() {
     if (pruned) saveTabs()
   } catch {}
   try { layout = JSON.parse(readFileSync(LAYOUT_FILE, 'utf8')) } catch {}
+  try { for (const t of JSON.parse(readFileSync(ORCH_TABS_FILE, 'utf8'))) if (t?.tabRef) orchTabs.set(t.tabRef, t) } catch {}
 }
 loadPersisted()
 
+// Tighten what earlier runs left: every .jeeves-* file owner-only; MCP configs holding a
+// previous boot's tokens (the old shared .jeeves-mcp.json and .jeeves-mcp-worker.json, and
+// per-session ones) removed — every spawn writes its own.
+function tidyPrivateFiles() {
+  for (const n of ['.jeeves-mcp.json', '.jeeves-mcp-worker.json']) { try { unlinkSync(join(__dirname, n)) } catch {} }
+  try { for (const n of readdirSync(SESSIONS_DIR)) if (n.endsWith('.mcp.json')) { try { unlinkSync(join(SESSIONS_DIR, n)) } catch {} } } catch {}
+  for (const n of readdirSync(__dirname)) {
+    if (!n.startsWith('.jeeves-')) continue
+    const f = join(__dirname, n)
+    try { chmodSync(f, statSync(f).isDirectory() ? 0o700 : PRIVATE) } catch {}
+  }
+  try { for (const n of readdirSync(SESSIONS_DIR)) chmodSync(join(SESSIONS_DIR, n), PRIVATE) } catch {}
+}
+tidyPrivateFiles()
+
+// A failed listen (port in use) ends the process: the error handlers above would otherwise keep a server that serves nothing.
+const listenFailed = (e) => { console.error(`cockpit: cannot listen on ${HOST}:${PORT} — ${e.message}`); process.exit(1) }
+server.once('error', listenFailed)
 server.listen(PORT, HOST, () => {
+  server.off('error', listenFailed)
   // Windows PowerShell 5.1's console isn't UTF-8: → and · come out as mojibake.
   const [arrow, dot] = WIN ? ['->', '-'] : ['→', '·']
   console.log(`Jeeves Cockpit backend ${arrow} http://${HOST}:${PORT} (loopback only)`)

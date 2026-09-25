@@ -1,7 +1,7 @@
 # Jeeves identity (personal — never shared)
 
 The only truly personal facts Jeeves needs. Every project config references these, so you set
-them once. Fill the four values and delete the angle brackets.
+them once. Fill the first four fields and delete the angle brackets; leave the fifth blank.
 
 - **gh login:** `<your-github-username>`      # e.g. octocat — confirm with `gh api user -q .login`
 - **Jira email:** `<you@company.com>`         # the address Jira knows you by (assignee / QA assignee)

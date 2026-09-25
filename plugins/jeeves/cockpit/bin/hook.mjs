@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Cross-platform Claude Code lifecycle hook: POSTs { id, status, sessionId } to the
-// cockpit's /api/hook so a session's dot reflects working / awaiting / idle / offline,
+// cockpit's /api/hook ($JEEVES_HOOK_URL, which carries the hook token and is set in every
+// session the cockpit launches, so the token is never on a command line) so a session's dot reflects working / awaiting / idle / offline,
 // and so the cockpit follows the live session id (it changes on /clear and /resume,
 // and a respawn must resume the current one). Used
 // instead of a curl one-liner so it runs the same on macOS, Linux and Windows
@@ -8,7 +9,8 @@
 // fail its session.
 import http from 'node:http'
 
-const [, , id, status, url] = process.argv
+const [, , id, status] = process.argv
+const url = process.env.JEEVES_HOOK_URL
 if (!id || !status || !url) process.exit(0)
 
 // Claude Code writes the hook input (JSON with session_id) to stdin. Read it, but

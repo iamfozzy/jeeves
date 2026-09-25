@@ -35,8 +35,6 @@ conversation. You're given a PR number and its repo.
    applies). Report once they're green or you're blocked.
 9. Never reply to, resolve or dismiss a thread; never approve or merge.
 
-If the `mcp__cockpit__report` tool is available, call it with `{ workId (from your system prompt),
-status: "done"|"blocked"|"error", summary, threads }` — `threads` maps thread-id → disposition
-("fixed in <sha>" / "already addressed: <why>" / "left open: <question>") — to report your result;
-do not merely print it. Otherwise, report back as text: the pushed sha, the CI result, and the same
-thread map.
+Your report carries the pushed sha, the CI result, and a thread map — thread-id → "fixed in <sha>"
+/ "already addressed: <why>" / "left open: <question>". Under the cockpit, report through the steps
+in your system prompt with that map as `threads`; headless, return all of it as text.

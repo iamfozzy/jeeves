@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { ActionIcon, AppShell, Badge, Box, Burger, Button, Group, Menu, Modal, Progress, ScrollArea, Stack, Text, Tooltip, UnstyledButton, useComputedColorScheme, useMantineColorScheme } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
 import { IconEye, IconMoon, IconRefresh, IconSettings, IconSun } from '@tabler/icons-react'
@@ -10,9 +10,10 @@ import { OrchestratorView } from './OrchestratorView'
 import { OpenFolderModal, OpenSpaceModal } from './OpenSpaceModal'
 import { TerminalPane } from './TerminalPane'
 import { SpacePanel } from './SpacePanel'
-import { closeWork, deleteWorktree, getConfig, getGit, getHealth, getLayout, killSession, restartOrchestrator, saveLayout } from './api'
+import { closeWork, deleteWorktree, getConfig, getGit, getHealth, getLayout, isHttpUrl, isUnauthorized, killSession, onUnauthorized, restartOrchestrator, saveLayout } from './api'
 import { CLIENT_ID, useCockpitEvents } from './events'
 import { applyAppearance, DEFAULT_APPEARANCE } from './theme'
+import { applyOwnActiveTabs, mergeLocalSpaces, resolveActiveSpaceId, stripActiveTabs } from './types'
 import type { GitInfo, Health, Layout, OrchContext, RepoCfg, Space, Tab, TabKind, WorkerSpace } from './types'
 
 const HEADER_H = 48
@@ -22,6 +23,8 @@ const PINNED_KEY = 'jeeves-cockpit-pinned'       // repo ids always shown in the
 const RECENT_KEY = 'jeeves-cockpit-recent-repos' // repo ids, most recently opened first
 const PANEL_KEY = 'jeeves-cockpit-panel'         // git side panel shown ('1') or hidden ('0')
 const MERGED_KEY = 'jeeves-cockpit-layout-merged' // this browser's spaces folded into the server's layout
+const ACTIVE_TAB_KEY = 'jeeves-cockpit-active-tab' // spaceId → tabId, per browser like activeSpaceId — never synced
+const STALL_KEY = 'jeeves-cockpit-stall-told'     // sessionStorage: the stall (its tick or start time) already notified
 const ORCH = 'orch'
 const SCRATCH = 'scratch'
 const rid = () => Math.random().toString(36).slice(2, 8)
@@ -48,6 +51,13 @@ function saveIds(key: string, ids: string[]) {
   try { localStorage.setItem(key, JSON.stringify(ids)) } catch {}
 }
 
+function loadActiveTabs(): Record<string, string> {
+  try {
+    const p = JSON.parse(localStorage.getItem(ACTIVE_TAB_KEY) || '{}')
+    return p && typeof p === 'object' ? p : {}
+  } catch { return {} }
+}
+
 function loadLayout(): { spaces: Space[]; activeSpaceId: string } {
   try {
     const raw = localStorage.getItem(LS_KEY)
@@ -60,6 +70,7 @@ function loadLayout(): { spaces: Space[]; activeSpaceId: string } {
 }
 
 export function App() {
+  const unauthorized = useSyncExternalStore(onUnauthorized, isUnauthorized)
   const [repos, setRepos] = useState<RepoCfg[]>([])
   const [home, setHome] = useState('')
   const [scratchRoot, setScratchRoot] = useState('')
@@ -75,12 +86,20 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [pinned, setPinned] = useState<string[]>(() => loadIds(PINNED_KEY))
   const [recent, setRecent] = useState<string[]>(() => loadIds(RECENT_KEY))
+  // Which tab is active in a space is per-browser, like activeSpaceId — never part
+  // of the synced layout. Kept in a ref (not state): it's read inside patchSpace's
+  // updater and written straight to storage, never needs its own render.
+  const activeTabsRef = useRef<Record<string, string>>(loadActiveTabs())
+  const setActiveTab = (spaceId: string, tabId: string) => {
+    activeTabsRef.current = { ...activeTabsRef.current, [spaceId]: tabId }
+    try { localStorage.setItem(ACTIVE_TAB_KEY, JSON.stringify(activeTabsRef.current)) } catch {}
+  }
   // The git side panel's shown/hidden state: one setting for every space and worker.
   const [panelOpen, setPanelOpen] = useState(() => { try { return localStorage.getItem(PANEL_KEY) !== '0' } catch { return true } })
   const togglePanel = () => setPanelOpen((v) => { const n = !v; try { localStorage.setItem(PANEL_KEY, n ? '1' : '0') } catch {}; return n })
   // 'repos' = the sidebar's "Open space…" picker; 'switch' = the ⌘P quick switcher.
   const [picker, setPicker] = useState<{ mode: 'repos' | 'switch'; open: boolean }>({ mode: 'repos', open: false })
-  const { surface, workers, context, sessions, configNonce, openCmds, spaceCmds, remoteLayout, reminders } = useCockpitEvents()
+  const { surface, workers, workersLoaded, context, sessions, configNonce, openCmds, spaceCmds, remoteLayout, connectNonce, reminders } = useCockpitEvents()
   const { setColorScheme } = useMantineColorScheme()
   const scheme = useComputedColorScheme('dark')
   // Below the sm breakpoint the sidebar is a full-screen drawer behind the header's burger;
@@ -101,7 +120,8 @@ export function App() {
 
   // Open spaces the orchestrator asks for (open_space tool). Process each command
   // id once; wait for its repo to be known. Borrowed, so closing never deletes the
-  // worktree the user asked to open.
+  // worktree the user asked to open. The space's id is the command's spaceRef and
+  // its tab id the server's, so every browser builds the same space and sids.
   const openedCmds = useRef<Set<string>>(new Set())
   useEffect(() => {
     for (const c of openCmds) {
@@ -118,13 +138,20 @@ export function App() {
   // add_tab / close_space, targeting a space by its openId (the spaceRef
   // open_space returned) or its id (open_tab from a claude tab). An add_tab with
   // `open` opens its space when none has that spaceRef; a second command for the
-  // same spaceRef waits for the next pass, once that space is in state. Each
-  // command id is processed once.
+  // same spaceRef waits for the next pass, once that space is in state. An add_tab
+  // to the Scratchpad also shows it. close_tab drops a tab the server already ended,
+  // wherever it is. Each command id is processed once.
   const ranSpaceCmds = useRef<Set<string>>(new Set())
   useEffect(() => {
     const opening = new Set<string>()
     for (const c of spaceCmds) {
       if (ranSpaceCmds.current.has(c.id)) continue
+      if (c.t === 'close_tab') {
+        ranSpaceCmds.current.add(c.id)
+        const holder = [scratch, ...spaces].find((s) => s.tabs.some((t) => t.id === c.tabId))
+        if (holder) dropTab(holder.id, c.tabId!)
+        continue
+      }
       const target = c.spaceId === SCRATCH ? scratch : spaces.find((s) => (c.spaceId ? s.id === c.spaceId : s.openId === c.spaceRef))
       if (!target) {
         const repo = c.open && (c.open.repoId ? repos.find((r) => r.id === c.open!.repoId) : null)
@@ -135,11 +162,11 @@ export function App() {
         continue
       }
       ranSpaceCmds.current.add(c.id)
-      if (c.t === 'add_tab') addTab(target.id, c.kind ?? 'claude', c.tab)
+      if (c.t === 'add_tab') { addTab(target.id, c.kind ?? 'claude', c.tab); if (target.id === SCRATCH) setActiveSpaceId(SCRATCH) }
       else removeSpace(target.id)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [spaceCmds, spaces, repos])
+  }, [spaceCmds, spaces, scratch, repos])
 
   useEffect(() => saveIds(PINNED_KEY, pinned), [pinned])
   useEffect(() => saveIds(RECENT_KEY, recent), [recent])
@@ -170,13 +197,29 @@ export function App() {
   // The layout is the server's (/api/layout), shared by every browser and origin;
   // localStorage only paints it before the fetch lands. Nothing is saved until the
   // fetch has, so a stale local copy never overwrites the server's. `synced` holds
-  // the last layout read from or sent to the server, so applying one never echoes.
+  // the last layout read from or sent to the server (activeTabId blanked out, since
+  // that's per-browser and never part of what two browsers agree is "the same
+  // layout"), so applying one — or switching a tab — never triggers an echoing save.
   const synced = useRef('')
   const [hydrated, setHydrated] = useState(false)
+  // Whether THIS connection's own resync has landed yet: set false the moment the
+  // socket (re)opens, true once its `layout` push (or the initial REST fetch) has
+  // been applied. Saving before that could clobber the server with a locally-drifted
+  // copy from before the drop.
+  const [layoutSynced, setLayoutSynced] = useState(false)
+  const seenConnect = useRef(0)
+  useEffect(() => {
+    if (connectNonce === seenConnect.current) return
+    seenConnect.current = connectNonce
+    setLayoutSynced(false)
+  }, [connectNonce])
   function applyLayout(l: Layout) {
-    synced.current = JSON.stringify({ spaces: l.spaces, scratch: l.scratch, pinned: l.pinned, recent: l.recent })
-    setSpaces(l.spaces); setScratch(l.scratch); setPinned(l.pinned); setRecent(l.recent)
+    synced.current = JSON.stringify({ spaces: stripActiveTabs(l.spaces), scratch: stripActiveTabs([l.scratch])[0], pinned: l.pinned, recent: l.recent })
+    setSpaces(applyOwnActiveTabs(l.spaces, activeTabsRef.current))
+    setScratch(applyOwnActiveTabs([l.scratch], activeTabsRef.current)[0])
+    setPinned(l.pinned); setRecent(l.recent)
     setActiveSpaceId((a) => (a === ORCH || a === SCRATCH || a.startsWith('work:') || l.spaces.some((s) => s.id === a) ? a : ORCH))
+    setLayoutSynced(true)
   }
   // A browser's first sync folds in the spaces only it knows (they lived in its own
   // localStorage, per origin); after that the server's layout wins outright.
@@ -186,28 +229,49 @@ export function App() {
       try { first = !localStorage.getItem(MERGED_KEY); localStorage.setItem(MERGED_KEY, '1') } catch {}
       if (!layout) return // this browser's layout seeds the server
       if (!first) return applyLayout(layout)
-      const mine = spaces.filter((s) => !layout.spaces.some((x) => x.id === s.id))
+      const mine = mergeLocalSpaces(spaces, layout.spaces)
       applyLayout(layout)
       if (mine.length) setSpaces((prev) => [...prev, ...mine])
     }).catch(() => {}).finally(() => setHydrated(true))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+  // The server pushes the current layout on every connect (so a reconnect resyncs)
+  // and again whenever another browser saves; both land here.
   useEffect(() => { if (remoteLayout) applyLayout(remoteLayout) }, [remoteLayout])
   useEffect(() => {
-    if (!hydrated) return
+    if (!hydrated || !layoutSynced) return
     const l: Layout = { spaces, scratch, pinned, recent }
-    const j = JSON.stringify(l)
+    const j = JSON.stringify({ spaces: stripActiveTabs(l.spaces), scratch: stripActiveTabs([l.scratch])[0], pinned: l.pinned, recent: l.recent })
     if (j === synced.current) return
     synced.current = j
     saveLayout(l, CLIENT_ID).catch(() => {})
-  }, [hydrated, spaces, scratch, pinned, recent])
+  }, [hydrated, layoutSynced, spaces, scratch, pinned, recent])
+
+  // A work: view outlives its worker until the first 'spaces' message confirms
+  // whether it's still dispatched — closing it elsewhere (or a stale reload) must
+  // fall back to the orchestrator once we actually know, not guess.
+  useEffect(() => {
+    setActiveSpaceId((a) => resolveActiveSpaceId(a, workers, workersLoaded, ORCH))
+  }, [workers, workersLoaded])
 
   const gitKey = spaces.map((s) => s.id + ':' + s.cwd).join('|')
   useEffect(() => {
     let cancelled = false
+    let inFlight = false // skip a tick if the previous round hasn't settled
     const poll = async () => {
-      const entries = await Promise.all(spaces.map(async (s) => [s.id, await getGit(s.cwd)] as const))
-      if (!cancelled) setGitBySpace(Object.fromEntries(entries))
+      if (inFlight) return
+      inFlight = true
+      // allSettled: one space's git call failing (a deleted worktree, a hiccup)
+      // must not blank every other space's badge for the tick.
+      const settled = await Promise.allSettled(spaces.map((s) => getGit(s.cwd)))
+      if (!cancelled) {
+        setGitBySpace((prev) => {
+          const next = { ...prev }
+          spaces.forEach((s, i) => { const r = settled[i]; if (r.status === 'fulfilled') next[s.id] = r.value })
+          return next
+        })
+      }
+      inFlight = false
     }
     poll()
     const iv = window.setInterval(poll, 5000)
@@ -215,19 +279,31 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gitKey])
 
+  // Runs `fn`, then — if it changed which tab is active — records that as this
+  // browser's own choice for the space, so a later synced layout can't overrule it.
   const patchSpace = (id: string, fn: (s: Space) => Space) => {
-    if (id === SCRATCH) { setScratch(fn); return }
-    setSpaces((prev) => prev.map((s) => (s.id === id ? fn(s) : s)))
+    if (id === SCRATCH) {
+      setScratch((s) => { const next = fn(s); if (next.activeTabId !== s.activeTabId) setActiveTab(SCRATCH, next.activeTabId); return next })
+      return
+    }
+    setSpaces((prev) => prev.map((s) => {
+      if (s.id !== id) return s
+      const next = fn(s)
+      if (next.activeTabId !== s.activeTabId) setActiveTab(id, next.activeTabId)
+      return next
+    }))
   }
 
   // `first` fixes the first tab (a server-launched child tab); focus=false opens
-  // the space without switching to it.
+  // the space without switching to it. A server-opened space (`openId`) takes that
+  // as its id, so every browser opening it builds the same space.
   // `repo` null opens a folder space: any folder, no repo, git panel only if it's a git repo.
   function openSpace(repo: RepoCfg | null, cwd: string, label: string, kind: TabKind = 'shell', borrowed = false, openId?: string, first?: Tab, focus = true) {
     const dup = spaces.filter((s) => s.name === label || s.name.startsWith(label + ' ·')).length
     const tab = first ?? { id: rid(), kind }
+    const id = openId ?? rid()
     const space: Space = {
-      id: rid(),
+      id,
       repoId: repo?.id ?? '',
       name: dup ? `${label} · ${dup + 1}` : label,
       cwd,
@@ -236,7 +312,8 @@ export function App() {
       borrowed,
       openId
     }
-    setSpaces((s) => [...s, space])
+    setActiveTab(id, tab.id) // this browser's own choice for a space every browser may end up sharing
+    setSpaces((s) => (s.some((x) => x.id === space.id) ? s : [...s, space]))
     if (focus) setActiveSpaceId(space.id)
     if (repo) setRecent((r) => [repo.id, ...r.filter((x) => x !== repo.id)].slice(0, 50))
   }
@@ -302,11 +379,16 @@ export function App() {
   async function confirmCloseWorker(removeWt: boolean, force: boolean) {
     if (!closingWorker) return
     setDeleting(true)
-    const r = await closeWork(closingWorker.workId, removeWt, force)
-    setDeleting(false)
-    if (r.error) { setCloseErr(r.error); return } // dirty worktree → offer force
-    if (activeSpaceId === 'work:' + closingWorker.workId) setActiveSpaceId(ORCH)
-    setClosingWorker(null) // the bus drop pushes a spaces update that removes it from the UI
+    try {
+      const r = await closeWork(closingWorker.workId, removeWt, force)
+      if (r.error) { setCloseErr(r.error); return } // dirty worktree → offer force
+      if (activeSpaceId === 'work:' + closingWorker.workId) setActiveSpaceId(ORCH)
+      setClosingWorker(null) // the bus drop pushes a spaces update that removes it from the UI
+    } catch (e) {
+      setCloseErr(e instanceof Error ? e.message : 'failed to close')
+    } finally {
+      setDeleting(false)
+    }
   }
 
   function removeSpace(id: string) {
@@ -343,6 +425,10 @@ export function App() {
   }
   function closeTab(spaceId: string, tabId: string) {
     killSession(`${spaceId}:${tabId}`)
+    dropTab(spaceId, tabId)
+  }
+  // Remove a tab from its space; its session is ended separately.
+  function dropTab(spaceId: string, tabId: string) {
     patchSpace(spaceId, (s) => {
       const tabs = s.tabs.filter((t) => t.id !== tabId)
       const activeTabId = s.activeTabId === tabId ? tabs[tabs.length - 1]?.id ?? '' : s.activeTabId
@@ -371,8 +457,22 @@ export function App() {
 
   async function doRestart() {
     if (!window.confirm('Restart the orchestrator? Relaunches it on a fresh session with the current settings — durable state lives in state.md, so nothing is lost.')) return
-    const r = await restartOrchestrator()
-    if (r.error) window.alert('Restart failed: ' + r.error)
+    try {
+      const r = await restartOrchestrator()
+      if (r.error) window.alert('Restart failed: ' + r.error)
+    } catch (e) {
+      window.alert('Restart failed: ' + (e instanceof Error ? e.message : 'unknown error'))
+    }
+  }
+
+  // Every request past a 401 fails the same way (a dead or stale token) — show one
+  // fixed message instead of a UI that's silently broken everywhere at once.
+  if (unauthorized) {
+    return (
+      <Box style={{ height: '100dvh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <Text size="sm" c="dimmed">unauthorized — reopen the cockpit from its token URL</Text>
+      </Box>
+    )
   }
 
   return (
@@ -488,7 +588,7 @@ export function App() {
       opened={settingsOpen}
       onClose={() => setSettingsOpen(false)}
       configNonce={configNonce}
-      onShowOrchestrator={() => { setSettingsOpen(false); setActiveSpaceId(ORCH) }}
+      onPromptTab={(tabId) => { addTab(SCRATCH, 'claude', { id: tabId, kind: 'claude' }); setActiveSpaceId(SCRATCH); setSettingsOpen(false) }}
     />
     <Picker
       opened={picker.open}
@@ -516,7 +616,7 @@ export function App() {
           )}
           <Text size="sm">Close <b>{closingWorker.agent} · {closingWorker.ticket || closingWorker.branch}</b>? Removing the worktree leaves any pushed branch/PR intact.</Text>
           <Text size="xs" c="dimmed" ff="monospace" style={{ wordBreak: 'break-all' }}>{closingWorker.cwd}</Text>
-          {closingWorker.pr && <Text size="xs">PR: <a href={closingWorker.pr} target="_blank" rel="noreferrer">{closingWorker.pr}</a></Text>}
+          {closingWorker.pr && <Text size="xs">PR: {isHttpUrl(closingWorker.pr) ? <a href={closingWorker.pr} target="_blank" rel="noreferrer">{closingWorker.pr}</a> : closingWorker.pr}</Text>}
           {closingWorker.summary && (
             <ScrollArea.Autosize mah={160} type="auto">
               <Text size="xs" c="dimmed" style={{ whiteSpace: 'pre-wrap' }}>{closingWorker.summary}</Text>
@@ -541,13 +641,21 @@ export function App() {
 // its branch/dirty state.
 function WatchingIndicator({ repos }: { repos: RepoCfg[] }) {
   const [git, setGit] = useState<Record<string, GitInfo>>({})
+  const [failed, setFailed] = useState<Record<string, boolean>>({})
   const key = repos.map((r) => r.id).join('|')
   useEffect(() => {
     if (!repos.length) return
     let cancelled = false
+    let inFlight = false
     const poll = async () => {
-      const e = await Promise.all(repos.map(async (r) => [r.id, await getGit(r.path)] as const))
-      if (!cancelled) setGit(Object.fromEntries(e))
+      if (inFlight) return
+      inFlight = true
+      const settled = await Promise.allSettled(repos.map((r) => getGit(r.path)))
+      if (!cancelled) {
+        setGit((prev) => { const next = { ...prev }; repos.forEach((r, i) => { const s = settled[i]; if (s.status === 'fulfilled') next[r.id] = s.value }); return next })
+        setFailed(Object.fromEntries(repos.map((r, i) => [r.id, settled[i].status === 'rejected'])))
+      }
+      inFlight = false
     }
     poll()
     const iv = window.setInterval(poll, 8000)
@@ -563,7 +671,9 @@ function WatchingIndicator({ repos }: { repos: RepoCfg[] }) {
         return (
           <Group key={r.id} gap={8} wrap="nowrap" justify="space-between">
             <Text size="xs">{r.slug}</Text>
-            <Text size="xs" ff="monospace" c="dimmed">{g ? (g.branch ?? 'no git') : '…'}{g?.changed ? ` ·±${g.changed}` : ''}{g?.ahead ? ` ·↑${g.ahead}` : ''}</Text>
+            <Text size="xs" ff="monospace" c={failed[r.id] ? 'red' : 'dimmed'}>
+              {failed[r.id] ? 'unreachable' : g ? (g.branch ?? 'no git') : '…'}{g?.changed ? ` ·±${g.changed}` : ''}{g?.ahead ? ` ·↑${g.ahead}` : ''}
+            </Text>
           </Group>
         )
       })}
@@ -634,21 +744,26 @@ const ORCH_DOT: Record<string, string> = {
   idle: 'var(--mantine-color-teal-5)',
   exited: 'var(--mantine-color-gray-6)'
 }
-// The loop is stalled when it hasn't ticked for twice the gap it should keep. The age
-// is re-read every 30 s; a stall raises one browser notification when they're allowed.
+// Stalled is the server's own call (ctx.stalled — missing means not); the age
+// (since the last tick, or before the first, since the server started) is only for
+// display, re-read every 30 s. A stall raises one browser notification when they're
+// allowed, and a reload doesn't raise it again (the notified stall is kept in
+// sessionStorage).
 function useStall(ctx: OrchContext | null) {
   const [now, setNow] = useState(Date.now())
   useEffect(() => { const t = window.setInterval(() => setNow(Date.now()), 30e3); return () => clearInterval(t) }, [])
-  const last = ctx?.lastTickAt || 0, every = ctx?.tickEveryMs || 300e3
-  const age = last ? now - last : null
-  const stalled = age != null && age > 2 * every && ctx?.status !== 'exited'
+  const ticked = ctx?.lastTickAt || 0
+  const since = ticked || ctx?.startedAt || 0
+  const age = since ? now - since : null
+  const stalled = ctx?.stalled === true
   const told = useRef(0)
   useEffect(() => {
-    if (!stalled || told.current === last) return
-    told.current = last
+    if (!stalled || told.current === since) return
+    told.current = since
+    try { if (sessionStorage.getItem(STALL_KEY) === String(since)) return; sessionStorage.setItem(STALL_KEY, String(since)) } catch {}
     try { if (Notification.permission === 'granted') new Notification('Jeeves has stopped ticking', { body: `No tick for ${Math.round((age ?? 0) / 60e3)} min — check the orchestrator pane.` }) } catch {}
-  }, [stalled, last, age])
-  return { age, stalled }
+  }, [stalled, since, age])
+  return { age, ticked, stalled }
 }
 // One usage bar: label and percent over a bar coloured by how close it is to the limit,
 // with the time until it resets.
@@ -672,7 +787,7 @@ const ago = (ms: number) => (ms < 60e3 ? 'just now' : ms < 3600e3 ? `${Math.roun
 function OrchControl({ ctx, onRestart }: { ctx: OrchContext | null; onRestart: () => void }) {
   const pct = ctx?.pct ?? null
   const rotateAt = ctx?.rotateAt ?? 70
-  const { age, stalled } = useStall(ctx)
+  const { age, ticked, stalled } = useStall(ctx)
   const hot = (pct != null && pct >= rotateAt) || stalled
   const color = pct == null && !stalled ? 'gray' : hot ? 'red' : pct != null && pct >= rotateAt - 15 ? 'yellow' : 'teal'
   const st = ctx?.status
@@ -693,7 +808,7 @@ function OrchControl({ ctx, onRestart }: { ctx: OrchContext | null; onRestart: (
         <Box px="sm" pb={6}>
           <Text size="xs" c="dimmed">Status: {st ?? 'unknown'}</Text>
           <Text size="xs" c={stalled ? 'red' : 'dimmed'}>
-            Last tick: {age == null ? 'not yet' : ago(age)}{stalled ? ` — expected every ${Math.round((ctx?.tickEveryMs ?? 300e3) / 60e3)} min` : ''}
+            Last tick: {ticked && age != null ? ago(age) : 'not yet'}{stalled ? ` — expected every ${Math.round((ctx?.tickEveryMs ?? 300e3) / 60e3)} min` : ''}
           </Text>
           <Text size="xs" c="dimmed">
             {ctx?.pct == null ? 'context — waiting for the session'

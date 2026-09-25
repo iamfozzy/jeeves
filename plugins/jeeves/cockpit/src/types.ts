@@ -171,11 +171,13 @@ export type OpenSpaceCmd = { id: string; repoId: string; cwd: string; label: str
 // (open_tab from a claude tab) by the space's own id. `tab` fixes the new tab's id,
 // which the server's pending launch is keyed by; `open` opens the space (borrowed,
 // in the background) when no space has that spaceRef — a worker's child tabs.
+// close_tab removes the tab `tabId` from whichever space holds it.
 export type SpaceCmd = {
   id: string
-  t: 'add_tab' | 'close_space'
+  t: 'add_tab' | 'close_space' | 'close_tab'
   spaceRef?: string
   spaceId?: string
+  tabId?: string
   kind?: TabKind
   tab?: Tab
   open?: { repoId: string; cwd: string; label: string }
@@ -191,8 +193,49 @@ export type OrchContext = {
   status?: string // hook-driven: working | awaiting | idle | exited
   updatedAt: number
   lastTickAt?: number  // when the loop last ticked (0 = not since the server started)
+  startedAt?: number   // when the server started (ms)
   tickEveryMs?: number // the gap it should keep right now (normal, mid-flight or overnight)
+  stalled?: boolean    // the server's own call — missing means not stalled
   // The account's rate limits, as a launched session's status line last reported them.
   usage?: { fiveHour: RateLimit | null; sevenDay: RateLimit | null; at: number } | null
 }
 export type RateLimit = { used: number; resetsAt: number | null } // used: percent; resetsAt: epoch ms
+
+// ── Pure layout/view decisions ──────────────────────────────────────────────
+// Kept free of any DOM-touching import (this module has none) so they run under
+// plain node:test via test/layout.cases.ts, same as ptyLink.ts and keys.ts.
+
+// A `work:<id>` view is stale once the first `spaces` message has told us which
+// workers are actually dispatched and this one isn't among them (closed elsewhere,
+// or from a browser reload after it ended). Before that first message, a guess
+// would be wrong more often than not, so the view is left alone. Everything else —
+// ORCH, SCRATCH, a browser's own space — is left alone regardless; this only knows
+// about worker views.
+export function resolveActiveSpaceId(activeSpaceId: string, workers: WorkerSpace[], workersLoaded: boolean, fallback: string): string {
+  if (!activeSpaceId.startsWith('work:')) return activeSpaceId
+  if (!workersLoaded) return activeSpaceId
+  const workId = activeSpaceId.slice('work:'.length)
+  return workers.some((w) => w.workId === workId) ? activeSpaceId : fallback
+}
+
+// A browser's first sync folds in the spaces it only knows about (opened locally
+// before the server's layout ever arrived) alongside the server's canonical list;
+// every later sync just takes the server's layout outright, so this only runs once.
+export function mergeLocalSpaces(localSpaces: Space[], serverSpaces: Space[]): Space[] {
+  return localSpaces.filter((s) => !serverSpaces.some((x) => x.id === s.id))
+}
+
+// Which tab is active in a space is a per-browser choice (like activeSpaceId, never
+// synced): once this browser has picked one, that choice wins over whatever another
+// browser last saved for the same space. A space this browser has never chosen a
+// tab in yet keeps the incoming value (e.g. a space another browser just opened).
+export function applyOwnActiveTabs(spaces: Space[], own: Record<string, string>): Space[] {
+  return spaces.map((s) => (own[s.id] ? { ...s, activeTabId: own[s.id] } : s))
+}
+
+// The wire layout never carries per-browser tab selection: comparing (and marking
+// "already synced") a copy with every activeTabId blanked out means switching tabs
+// alone never looks like a change worth saving, and never triggers a save.
+export function stripActiveTabs(spaces: Space[]): Space[] {
+  return spaces.map((s) => ({ ...s, activeTabId: '' }))
+}

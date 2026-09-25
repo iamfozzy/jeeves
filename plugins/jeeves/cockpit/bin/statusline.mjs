@@ -8,15 +8,19 @@
 //   statusline.mjs --relay    for sessions the cockpit launches: report the rate limits to
 //                             the cockpit ($JEEVES_USAGE_URL), then print the user's own
 //                             status line (the statusLine in ~/.claude/settings.json), or
-//                             this one when that's unset or is this script
+//                             this one when that's unset, is this script, or prints nothing,
+//                             fails or runs past USER_TIMEOUT_MS
 // Never fails: a status line must not break its session.
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import http from 'node:http'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const readStdin = () => { try { return readFileSync(0, 'utf8') } catch { return '' } }
+// A TTY never sends the JSON Claude Code pipes in, so reading it would just
+// block forever waiting for input (or Ctrl-D) that's never coming.
+const readStdin = () => { if (process.stdin.isTTY) return ''; try { return readFileSync(0, 'utf8') } catch { return '' } }
 const raw = readStdin()
 let j = {}
 try { j = JSON.parse(raw) } catch {}
@@ -45,6 +49,32 @@ function userCommand() {
     const cmd = JSON.parse(readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf8')).statusLine?.command
     return typeof cmd === 'string' && cmd.trim() && !/statusline\.mjs/.test(cmd) ? cmd : null
   } catch { return null }
+}
+
+// Kill the whole tree spawned for the user's command, not just its immediate process:
+// on POSIX that's the detached process group (negative pid); spawn() can't detach on
+// Windows, so a plain kill() would only take out the shell and leave its children
+// running — `taskkill /T` walks the tree by pid instead.
+export function killTree(win, pid) {
+  try { win ? execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }) : process.kill(-pid, 'SIGKILL') } catch {}
+}
+
+// Run the user's status line on the same input: its output, or null when it prints nothing,
+// exits non-zero or outlasts USER_TIMEOUT_MS (then its whole process group is killed).
+const USER_TIMEOUT_MS = 1500
+function runUser(cmd) {
+  return new Promise((done) => {
+    const win = process.platform === 'win32'
+    let out = '', settled = false, p, timer
+    const finish = (ok) => { if (settled) return; settled = true; clearTimeout(timer); done(ok && out.trim() ? out : null) }
+    try { p = spawn(cmd, { shell: true, detached: !win, stdio: ['pipe', 'pipe', 'ignore'], env: { ...process.env, JEEVES_STATUSLINE_CHAINED: '1' } }) } catch { return done(null) }
+    timer = setTimeout(() => { killTree(win, p.pid); finish(false) }, USER_TIMEOUT_MS)
+    p.stdout.on('data', (d) => { out += d })
+    p.on('error', () => finish(false))
+    p.on('close', (code) => finish(code === 0))
+    p.stdin.on('error', () => {})
+    p.stdin.end(raw)
+  })
 }
 
 const sgr = (style, text) => (style ? `\x1b[${style}m${text}\x1b[0m` : text)
@@ -76,12 +106,13 @@ function render() {
   return l1 + '\n' + l2
 }
 
-try {
-  if (relay) await report()
-  const cmd = relay ? userCommand() : null
-  if (cmd) {
-    const r = spawnSync(cmd, { shell: true, input: raw, encoding: 'utf8', timeout: 5000, env: { ...process.env, JEEVES_STATUSLINE_CHAINED: '1' } })
-    process.stdout.write(r.stdout || '')
-  } else process.stdout.write(render())
-} catch {}
-process.exit(0)
+// Guarded so killTree (above) can be imported for a unit test without also running
+// the CLI's own stdin-to-stdout pass.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  try {
+    if (relay) await report()
+    const cmd = relay ? userCommand() : null
+    process.stdout.write((cmd && await runUser(cmd)) || render())
+  } catch {}
+  process.exit(0)
+}

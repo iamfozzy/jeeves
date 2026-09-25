@@ -3,11 +3,17 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { createRequire } from 'node:module'
 import http from 'node:http'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { killTree } from '../bin/statusline.mjs'
+
+// node-pty is a native CommonJS addon; load it through require, as server.mjs does.
+const require = createRequire(import.meta.url)
+const pty = require('node-pty')
 
 const SCRIPT = fileURLToPath(new URL('../bin/statusline.mjs', import.meta.url))
 const plain = (s) => s.replace(/\x1b\[[0-9;]*m/g, '')
@@ -63,4 +69,59 @@ test('--relay renders its own line when the user status line is this script, or 
     const { out } = await run(['--relay'], INPUT, { HOME: home })
     assert.match(plain(out), /ctx 13% · 5h 41%/)
   } finally { rmSync(home, { recursive: true, force: true }) }
+})
+
+// A user status line that hangs, fails or prints nothing gives way to this one's own line.
+for (const [name, command] of [
+  ['hangs (its process group is killed after ~1.5 s)', 'sleep 30 & sleep 30'],
+  ['fails', 'echo partial; exit 3'],
+  ['prints nothing', 'true']
+]) {
+  test(`--relay renders its own line when the user status line ${name}`, { skip: process.platform === 'win32' && 'POSIX shell commands' }, async () => {
+    const home = mkdtempSync(join(tmpdir(), 'sl-'))
+    mkdirSync(join(home, '.claude'))
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ statusLine: { command } }))
+    try {
+      const t = Date.now()
+      const { code, out } = await run(['--relay'], INPUT, { HOME: home })
+      assert.equal(code, 0)
+      assert.match(plain(out), /ctx 13% · 5h 41%/)
+      assert.ok(Date.now() - t < 4000, `took ${Date.now() - t} ms`)
+    } finally { rmSync(home, { recursive: true, force: true }) }
+  })
+}
+
+test('run under a real TTY with nothing typed: exits with the fallback line instead of blocking on stdin', { skip: process.platform === 'win32' && 'node-pty needs a conpty build here' }, async () => {
+  const term = pty.spawn(process.execPath, [SCRIPT], { name: 'xterm-256color', cols: 80, rows: 24, env: process.env })
+  let out = ''
+  term.onData((d) => { out += d })
+  const exit = new Promise((res) => term.onExit(({ exitCode }) => res(exitCode)))
+  const code = await Promise.race([
+    exit,
+    new Promise((_, rej) => setTimeout(() => rej(new Error('timed out — readStdin is blocking on the TTY')), 3000))
+  ])
+  assert.equal(code, 0)
+  assert.match(plain(out), /ctx 0%/)
+})
+
+test('killTree', { skip: process.platform === 'win32' && 'stubs a POSIX shim on PATH' }, async (t) => {
+  await t.test('Windows: tree-kills by pid via taskkill, not just the immediate process', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sl-killtree-'))
+    const log = join(dir, 'calls.txt')
+    writeFileSync(join(dir, 'taskkill'), `#!/bin/sh\necho "$@" >> "${log}"\n`, { mode: 0o755 })
+    const realPath = process.env.PATH
+    process.env.PATH = dir + delimiter + realPath
+    try {
+      killTree(true, 4242)
+      assert.equal(readFileSync(log, 'utf8').trim(), '/PID 4242 /T /F')
+    } finally { process.env.PATH = realPath; rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  await t.test('POSIX: signals the negated pid (the whole process group), not taskkill', () => {
+    let seen = null
+    const realKill = process.kill
+    process.kill = (pid, sig) => { seen = [pid, sig] }
+    try { killTree(false, 4242) } finally { process.kill = realKill }
+    assert.deepEqual(seen, [-4242, 'SIGKILL'])
+  })
 })

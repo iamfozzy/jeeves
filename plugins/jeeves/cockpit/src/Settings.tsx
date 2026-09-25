@@ -7,7 +7,7 @@ import {
   IconAlertTriangle, IconArrowBackUp, IconBell, IconCheck, IconChevronRight, IconCopy, IconDeviceFloppy,
   IconFolderCog, IconKey, IconPencil, IconPlus, IconRepeat, IconRobot, IconSearch, IconServer, IconShieldCheck, IconStack2, IconTrash, IconTypography, IconWand, IconX
 } from '@tabler/icons-react'
-import { editAgent, editReminder, getAgents, getConfigView, getGuardLog, getReminders, getSettings, getStatusLine, installStatusLine, saveConfig, saveSettings, sendOrchInput, type GuardRow, type StatusLineView } from './api'
+import { editAgent, editReminder, getAgents, getConfigView, getGuardLog, getReminders, getSettings, getStatusLine, installStatusLine, openPromptTab, saveConfig, saveSettings, type GuardRow, type StatusLineView } from './api'
 import { setToken } from './token'
 import { FONT_NAME, fontStack, previewFont, type FontKind } from './theme'
 import type {
@@ -37,11 +37,11 @@ const norm = (v: Val | null | undefined): Val | null => {
 const same = (a: Val | null | undefined, b: Val | null | undefined) => JSON.stringify(norm(a)) === JSON.stringify(norm(b))
 const blank = (s: FieldSpec): Val => (s.list ? [] : '')
 
-export function Settings({ opened, onClose, configNonce, onShowOrchestrator }: {
+export function Settings({ opened, onClose, configNonce, onPromptTab }: {
   opened: boolean
   onClose: () => void
-  configNonce: number              // bumps when config changes server-side → refetch
-  onShowOrchestrator: () => void   // close Settings and switch to the orchestrator view
+  configNonce: number                   // bumps when config changes server-side → refetch
+  onPromptTab: (tabId: string) => void  // add that claude tab to the Scratchpad, show it, close Settings
 }) {
   const [view, setView] = useState<ConfigView | null>(null)
   const [s, setS] = useState<SettingsView | null>(null)
@@ -98,7 +98,7 @@ export function Settings({ opened, onClose, configNonce, onShowOrchestrator }: {
         </Tabs.List>
 
         <Tabs.Panel value="projects">
-          <Pane>{view ? <ProjectsTab projects={view.projects} write={write} onShowOrchestrator={onShowOrchestrator} /> : loading}</Pane>
+          <Pane>{view ? <ProjectsTab projects={view.projects} write={write} onPromptTab={onPromptTab} /> : loading}</Pane>
         </Tabs.Panel>
         <Tabs.Panel value="defaults">
           <Pane>{view ? <DefaultsTab view={view} write={write} /> : loading}</Pane>
@@ -184,10 +184,13 @@ const PROJECT_FIELDS: (FieldSpec & { key: keyof ProjectFields; unsetText?: strin
 const overrideCount = (p: ProjectView) =>
   PROJECT_FIELDS.filter((s) => p.fields[s.key].source === 'project').length + p.otherOverrides.length
 
-function ProjectsTab({ projects, write, onShowOrchestrator }: { projects: ProjectView[]; write: Write; onShowOrchestrator: () => void }) {
+// A tab id the server accepts for a prompted tab (/^[a-z0-9]{4,16}$/).
+const tabId = () => Array.from(crypto.getRandomValues(new Uint8Array(4)), (b) => b.toString(16).padStart(2, '0')).join('')
+
+function ProjectsTab({ projects, write, onPromptTab }: { projects: ProjectView[]; write: Write; onPromptTab: (tabId: string) => void }) {
   const [q, setQ] = useState('')
   const [open, setOpen] = useState<string | null>(null)
-  const [adding, setAdding] = useState(false)
+  const [adding, setAdding] = useState<string | null>(null) // the prompt being launched
   const [addErr, setAddErr] = useState<string | null>(null)
 
   const needle = q.trim().toLowerCase()
@@ -195,13 +198,14 @@ function ProjectsTab({ projects, write, onShowOrchestrator }: { projects: Projec
     .sort((a, b) => a.slug.localeCompare(b.slug))
     .filter((p) => !needle || [p.slug, p.id, p.fields.jiraKey.value, p.fields.baseBranch.value].join(' ').toLowerCase().includes(needle))
 
-  // Onboarding runs in the orchestrator: type the scan into its composer and show it.
-  const addRepos = async () => {
-    setAdding(true); setAddErr(null)
-    const r = await sendOrchInput('/jeeves:setup --scan', true).catch((e) => ({ error: String(e) }))
-    setAdding(false)
+  // Onboarding runs in its own claude tab in the Scratchpad, never in the orchestrator.
+  const setup = async (prompt: string) => {
+    setAdding(prompt); setAddErr(null)
+    const id = tabId()
+    const r = await openPromptTab(id, prompt).catch((e) => ({ error: String(e) }))
+    setAdding(null)
     if (r.error) { setAddErr(r.error); return }
-    onShowOrchestrator()
+    onPromptTab(id)
   }
 
   return (
@@ -209,14 +213,19 @@ function ProjectsTab({ projects, write, onShowOrchestrator }: { projects: Projec
       title="Projects"
       description="Each project inherits Defaults; open one to see and change what it overrides."
       right={(
-        <Tooltip label="Runs /jeeves:setup --scan in the orchestrator" openDelay={300} withArrow>
-          <Button size="xs" variant="light" leftSection={<IconPlus size={14} />} loading={adding} onClick={addRepos} style={{ flex: 'none' }}>Add repos…</Button>
-        </Tooltip>
+        <Group gap="xs" wrap="nowrap" style={{ flex: 'none' }}>
+          <Tooltip label="Runs /jeeves:setup in a new Claude tab in the Scratchpad" openDelay={300} withArrow>
+            <Button size="xs" variant="subtle" leftSection={<IconWand size={14} />} loading={adding === '/jeeves:setup'} disabled={!!adding} onClick={() => setup('/jeeves:setup')}>Set up Jeeves</Button>
+          </Tooltip>
+          <Tooltip label="Runs /jeeves:setup --scan in a new Claude tab in the Scratchpad" openDelay={300} withArrow>
+            <Button size="xs" variant="light" leftSection={<IconPlus size={14} />} loading={adding === '/jeeves:setup --scan'} disabled={!!adding} onClick={() => setup('/jeeves:setup --scan')}>Add repos…</Button>
+          </Tooltip>
+        </Group>
       )}>
       <Stack gap={GAP.tight}>
         <TextInput placeholder={`Filter ${projects.length} project${projects.length === 1 ? '' : 's'}…`}
           leftSection={<IconSearch size={15} />} value={q} onChange={(e) => setQ(e.currentTarget.value)} />
-        {addErr ? <Alert color="red" variant="light" p="xs">Couldn't reach the orchestrator: {addErr}</Alert> : null}
+        {addErr ? <Alert color="red" variant="light" p="xs">Couldn't start setup: {addErr}</Alert> : null}
         {projects.length === 0 ? <Text size="sm" c="dimmed">No projects configured.</Text>
           : shown.length === 0 ? <Text size="sm" c="dimmed">No project matches “{q}”.</Text>
           : (
@@ -952,7 +961,7 @@ function GuardSection() {
           {rows.slice(0, 30).map((r, i) => (
             <Box key={i}>
               <Group gap={8} wrap="nowrap">
-                <Badge size="xs" variant="light" color="gray" style={{ flex: 'none' }}>{r.tool}</Badge>
+                <Badge size="xs" variant="light" color={r.allowed ? 'teal' : 'gray'} style={{ flex: 'none' }}>{r.allowed ? 'ran for you' : r.tool}</Badge>
                 <Text size="xs" ff="monospace" truncate style={{ minWidth: 0 }}>{r.what}</Text>
                 <Text size="xs" c="dimmed" ml="auto" style={{ flex: 'none' }}>{when(r.at)}</Text>
               </Group>

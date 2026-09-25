@@ -11,8 +11,8 @@ const INSTALL = fileURLToPath(new URL('../../bin/jeeves-install-cli', import.met
 const tmp = mkdtempSync(join(tmpdir(), 'jeeves-install-'))
 test.after(() => rmSync(tmp, { recursive: true, force: true }))
 
-const install = (dir, path = process.env.PATH) => new Promise((res, rej) => {
-  execFile('bash', [INSTALL, dir], { env: { ...process.env, PATH: path } }, (err, stdout, stderr) => (err ? rej(new Error(stderr || err.message)) : res(stdout)))
+const install = (dir, env = {}) => new Promise((res, rej) => {
+  execFile('bash', [INSTALL, dir], { env: { ...process.env, PATH: process.env.PATH, HOME: tmp, ...env } }, (err, stdout, stderr) => (err ? rej(new Error(stderr || err.message)) : res(stdout)))
 })
 const shim = (path, body) => { writeFileSync(path, `#!/bin/sh\n${body}\n`); chmodSync(path, 0o755) }
 
@@ -31,7 +31,7 @@ test('install-cli', { skip: process.platform === 'win32' && 'needs a POSIX bash'
     mkdirSync(shims)
     shim(join(shims, 'uname'), 'echo MINGW64_NT-10.0')
     shim(join(shims, 'cygpath'), "printf '%s\\n' 'C:\\fake'")
-    const out = await install(dir, shims + delimiter + process.env.PATH)
+    const out = await install(dir, { PATH: shims + delimiter + process.env.PATH })
     assert.ok(existsSync(join(dir, 'jeeves')))
     const cmd = readFileSync(join(dir, 'jeeves.cmd'), 'utf8')
     assert.match(cmd, /^@echo off\r\n/)
@@ -52,5 +52,44 @@ test('install-cli', { skip: process.platform === 'win32' && 'needs a POSIX bash'
     await install(dir)
     assert.equal(readFileSync(target, 'utf8'), 'keep me')
     assert.match(readFileSync(join(dir, 'jeeves'), 'utf8'), /Launch the Jeeves cockpit/)
+  })
+
+  await t.test('zsh: writes the PATH export to .zshrc, once', async () => {
+    const home = join(tmp, 'home-zsh'), dir = join(tmp, 'not-on-path-zsh')
+    mkdirSync(home)
+    const line = `export PATH="${dir}:$PATH"`
+    const out = await install(dir, { HOME: home, SHELL: '/bin/zsh' })
+    assert.ok(readFileSync(join(home, '.zshrc'), 'utf8').includes(line))
+    assert.match(out, /added .* to PATH in .*\.zshrc/)
+    const again = await install(dir, { HOME: home, SHELL: '/bin/zsh' })
+    const rc = readFileSync(join(home, '.zshrc'), 'utf8')
+    assert.equal(rc.split(line).length - 1, 1, 'the export line is not duplicated')
+    assert.match(again, /already added to PATH in .*\.zshrc/)
+  })
+
+  await t.test('bash: prefers an existing .bashrc over .bash_profile', async () => {
+    const home = join(tmp, 'home-bash'), dir = join(tmp, 'not-on-path-bash')
+    mkdirSync(home)
+    writeFileSync(join(home, '.bashrc'), '# existing\n')
+    await install(dir, { HOME: home, SHELL: '/bin/bash' })
+    assert.ok(readFileSync(join(home, '.bashrc'), 'utf8').includes(`export PATH="${dir}:$PATH"`))
+    assert.ok(!existsSync(join(home, '.bash_profile')))
+  })
+
+  await t.test('bash: falls back to .bash_profile when there is no .bashrc', async () => {
+    const home = join(tmp, 'home-bash-noprofile'), dir = join(tmp, 'not-on-path-bash2')
+    mkdirSync(home)
+    await install(dir, { HOME: home, SHELL: '/bin/bash' })
+    assert.ok(readFileSync(join(home, '.bash_profile'), 'utf8').includes(`export PATH="${dir}:$PATH"`))
+  })
+
+  await t.test('unrecognised $SHELL: prints instructions, writes no rc file', async () => {
+    const home = join(tmp, 'home-fish'), dir = join(tmp, 'not-on-path-fish')
+    mkdirSync(home)
+    const out = await install(dir, { HOME: home, SHELL: '/usr/local/bin/fish' })
+    assert.match(out, /Add it, e\.g\.:/)
+    assert.ok(!existsSync(join(home, '.zshrc')))
+    assert.ok(!existsSync(join(home, '.bashrc')))
+    assert.ok(!existsSync(join(home, '.bash_profile')))
   })
 })

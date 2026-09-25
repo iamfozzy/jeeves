@@ -1,10 +1,30 @@
+/// <reference types="vite/client" />
 import { useEffect, useState } from 'react'
 import { Badge, Box, Group, Loader, Modal, Text, useComputedColorScheme } from '@mantine/core'
-import { DiffEditor, type Monaco } from '@monaco-editor/react'
+import * as monaco from 'monaco-editor'
+import editorWorker from 'monaco-editor/editor/editor.worker?worker'
+import jsonWorker from 'monaco-editor/languages/features/json/json.worker?worker'
+import cssWorker from 'monaco-editor/languages/features/css/css.worker?worker'
+import htmlWorker from 'monaco-editor/languages/features/html/html.worker?worker'
+import tsWorker from 'monaco-editor/languages/features/typescript/ts.worker?worker'
+import { DiffEditor, loader, type Monaco } from '@monaco-editor/react'
 import { XTERM_THEMES } from './TerminalPane'
 import { getFileDiff } from './api'
 import type { FileDiff } from './types'
 import { CODE_FONT_SIZE, fontStack, useAppearance, whenFontLoaded } from './theme'
+
+// Monaco bundled from node_modules (no CDN fetch): one worker per language family,
+// matching Vite's own recipe for a locally-hosted editor.
+self.MonacoEnvironment = {
+  getWorker(_workerId: string, label: string) {
+    if (label === 'json') return new jsonWorker()
+    if (label === 'css' || label === 'scss' || label === 'less') return new cssWorker()
+    if (label === 'html' || label === 'handlebars' || label === 'razor') return new htmlWorker()
+    if (label === 'typescript' || label === 'javascript') return new tsWorker()
+    return new editorWorker()
+  }
+}
+loader.config({ monaco })
 
 // Extension → Monaco language id (best-effort; unknown falls back to plaintext).
 const LANG: Record<string, string> = {
@@ -100,7 +120,10 @@ export function DiffModal({ cwd, path, base, onClose }: { cwd: string; path: str
     if (!path) { setDiff(null); return }
     let cancelled = false
     setLoading(true)
-    getFileDiff(cwd, path, base).then((d) => { if (!cancelled) setDiff(d) }).finally(() => { if (!cancelled) setLoading(false) })
+    getFileDiff(cwd, path, base)
+      .then((d) => { if (!cancelled) setDiff(d) })
+      .catch((e) => { if (!cancelled) setDiff({ path, error: e instanceof Error ? e.message : 'failed to load' }) })
+      .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [cwd, path, base])
 

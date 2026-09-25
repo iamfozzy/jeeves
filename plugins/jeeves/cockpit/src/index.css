@@ -50,6 +50,14 @@ body { background: var(--ck-page); }
 .ck-tab[data-drop="after"]::before { right: -1px; }
 .ck-space { cursor: pointer; transition: background .1s ease; }
 .ck-space:not([data-active="true"]):hover { background: var(--ck-hover); }
+/* Tree connectors from under a repo/Folders header's icon (14px in) to each space's
+   dot (from 23.5px): a vertical run with a branch per row; the last row ends in a corner. */
+.ck-tree > .ck-space { position: relative; }
+.ck-tree > .ck-space::before,
+.ck-tree > .ck-space::after { content: ''; position: absolute; left: 14px; pointer-events: none; background: var(--mantine-color-default-border); }
+.ck-tree > .ck-space::before { top: 0; bottom: 0; width: 1px; }
+.ck-tree > .ck-space:last-child::before { bottom: 50%; }
+.ck-tree > .ck-space::after { top: 50%; width: 8px; height: 1px; }
 /* Status dot pinned to a sidebar row's logo; the ring matches the row behind it. */
 .ck-badge { box-shadow: 0 0 0 2px var(--ck-surface); }
 .ck-space:hover .ck-badge { box-shadow: 0 0 0 2px var(--ck-hover); }
@@ -154,6 +162,9 @@ body { background: var(--ck-page); }
 .ck-file:hover .ck-x,
 .ck-tab[data-active="true"] .ck-x,
 .ck-x[aria-expanded="true"] { opacity: 1; }
+/* Keyboard focus must show it too — a mouse-only hover rule leaves it invisible
+   (but still tabbable) for keyboard users. */
+.ck-x:focus-visible { opacity: 1; }
 
 /* ── Phones (below Mantine's sm breakpoint) ─────────────────────────────────
    Everything here is scoped to small or touch screens; the desktop layout never

@@ -6,8 +6,22 @@
 #   jeeves-devlink --status   print where the cache entry currently points
 set -euo pipefail
 
-dev="$(cd "$(dirname "$0")/.." && pwd)"                       # bin/ → checkout root
-cache="$HOME/.claude/plugins/cache/jeeves-dev/jeeves/unknown" # installPath from installed_plugins.json
+# Resolve $0 through symlinks by hand — macOS's bash lacks `readlink -f`. A PATH
+# entry (e.g. from jeeves-install-cli) is often a symlink to this script.
+self="$0"
+while [ -L "$self" ]; do
+  link="$(readlink "$self")"
+  case "$link" in
+    /*) self="$link" ;;
+    *) self="$(dirname "$self")/$link" ;;
+  esac
+done
+dev="$(cd "$(dirname "$self")/.." && pwd)"                    # bin/ → checkout root
+
+# installed_plugins.json keys the cache dir by the plugin's declared version, so
+# match that here; a plugin.json without one still falls back to "unknown".
+version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$dev/.claude-plugin/plugin.json" 2>/dev/null | head -1)"
+cache="$HOME/.claude/plugins/cache/jeeves-dev/jeeves/${version:-unknown}"
 
 if [ "${1:-}" = "--status" ]; then
   if [ -L "$cache" ]; then echo "linked → $(readlink "$cache")"

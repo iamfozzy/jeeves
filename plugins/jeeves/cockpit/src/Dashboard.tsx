@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react'
+import { memo, useEffect, useState } from 'react'
 import { ActionIcon, Badge, Box, Group, HoverCard, Menu, Select, Stack, Text, Tooltip, UnstyledButton } from '@mantine/core'
 import {
   IconAlarm, IconAlertTriangle, IconCircleCheck, IconExternalLink, IconFileSearch,
   IconGitPullRequest, IconListDetails, IconLoader2, IconSearch, IconTestPipe
 } from '@tabler/icons-react'
-import { editReminder, sendOrchInput } from './api'
+import { editReminder, isHttpUrl, sendOrchInput } from './api'
 import { PrModal } from './PrModal'
 import { Section } from './Section'
 import type { Checks, Dot, QaRow, Reminder, RepoCfg, Story, StoryPhase, SurfaceAction, Surface, WorkerSpace } from './types'
@@ -67,14 +67,19 @@ type AnyRow = { item: string; repo?: string; dot?: Dot; number?: string | number
 // A sorted row plus its rank position and identity.
 type View<T> = { r: T; n: number; id: string }
 
-export function Dashboard({ repos, surface, workers, reminders: rows }: { repos: RepoCfg[]; surface: Surface; workers: WorkerSpace[]; reminders: Reminder[] }) {
+export const Dashboard = memo(function Dashboard({ repos, surface, workers, reminders: rows }: { repos: RepoCfg[]; surface: Surface; workers: WorkerSpace[]; reminders: Reminder[] }) {
   // Reminder dots and "overdue" follow the clock, so re-render every minute.
   const [now, setNow] = useState(Date.now())
   useEffect(() => { const t = window.setInterval(() => setNow(Date.now()), 60e3); return () => clearInterval(t) }, [])
   const [sent, setSent] = useState<string | null>(null)
   const [prModal, setPrModal] = useState<{ repoId: string; number: string | number; title?: string } | null>(null)
   const flash = (k: string) => { setSent(k); window.setTimeout(() => setSent((s) => (s === k ? null : s)), 1400) }
-  const fire = (a: SurfaceAction) => { if (!a.run) return; sendOrchInput(a.run, !a.type).catch(() => {}); flash(a.run) }
+  // The ✓ only flashes once the orchestrator actually took the input — not on a
+  // request that never reached it.
+  const fire = (a: SurfaceAction) => {
+    if (!a.run) return
+    sendOrchInput(a.run, !a.type).then((r) => { if (!r.error) flash(a.run!) }).catch(() => {})
+  }
 
   // Open a PR/review row's description in a modal. Only when the repo resolves.
   const openPr = (repo?: string, num?: string | number, title?: string) => {
@@ -344,7 +349,7 @@ export function Dashboard({ repos, surface, workers, reminders: rows }: { repos:
       />
     </Stack>
   )
-}
+})
 
 function StorySub({ st, repo, repos }: { st: Story; repo?: RepoCfg; repos: RepoCfg[] }) {
   const ph = st.phase ? PHASE[st.phase] : null
@@ -385,7 +390,7 @@ function Actions({ actions, repo, ghNum, sent, fire }: {
   actions?: SurfaceAction[]; repo?: RepoCfg; ghNum?: string | number
   sent: string | null; fire: (a: SurfaceAction) => void
 }) {
-  const list = actions ?? []
+  const list = (actions ?? []).filter((a) => !a.href || isHttpUrl(a.href)) // a non-http(s) link is dropped
   const ghHref = ghNum != null && repo ? `https://github.com/${repo.slug}/pull/${String(ghNum).replace(/^#/, '')}` : null
   if (!list.length && !ghHref) return null
   const flashing = list.some((a) => a.run === sent)

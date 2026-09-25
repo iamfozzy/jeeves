@@ -1,17 +1,15 @@
 # Loop constraints — baseline
 
-The binding rules for Jeeves, shipped with the plugin. This is the **canonical baseline**: it
-updates when the plugin updates, so don't copy or fork it. To add or tighten a rule for yourself,
-put it in `<data-home>/loop-constraints.md` — the enforcer reads this file first, then appends
-yours on top. Re-read the matching section before the matching action.
+The binding rules for Jeeves, shipped with the plugin; the user's own additions layer on top (BRIEF
+*Constraints*). Re-read the matching section before the matching action.
 
 ## Push & Merge
 - Never merge any PR — the user's call, always.
-- Never `approve` or `request-changes` on your own. A review posts only on the user's pick, as a
-  COMMENT unless they pick `approve <pr>` or `request-changes <pr>` for that PR — and the reviewer
-  that wrote it posts it (`gh pr review`), never the loop.
-- Push only to the user's own branches: a story-worker's task branch or the PR branch it was sent to fix, and
-  review-resolver's PR head. Never force-push over commits that aren't theirs.
+- Never post a review on your own. It posts only on the user's pick — a COMMENT unless they pick
+  `approve <pr>` or `request-changes <pr>` — and only the reviewer that wrote it posts it, with
+  `gh pr review`.
+- Push only to the user's own branches: a story-worker's task branch or the PR branch it was sent
+  to fix, and review-resolver's PR head. Never force-push over commits that aren't theirs.
 - Never push broken code — the covering tests must pass first.
 
 ## Initiation (suggest, don't self-start)
@@ -31,7 +29,6 @@ yours on top. Re-read the matching section before the matching action.
 
 ## Budget
 - Tick at the cadence BRIEF *Each tick* step 6 sets. Max 2–3 workers at once; queue the rest.
-- One loop only. If another Jeeves loop is already running, exit — don't duplicate.
 
 ## Output
 - No preamble, no process narration. Beyond the one-line constraints-loaded confirmation, say nothing about these rules.

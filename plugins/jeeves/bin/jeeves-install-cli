@@ -61,6 +61,23 @@ case ":$PATH:" in
        echo "  powershell -NoProfile -Command \"[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';$(cygpath -w "$dir")', 'User')\""
        echo "then open a new terminal."
      else
-       echo "note: $dir is not on your PATH. Add it, e.g.:"; echo "  echo 'export PATH=\"$dir:\$PATH\"' >> ~/.zshrc && exec \$SHELL"
+       # Write the PATH export straight into the rc file $SHELL will actually
+       # source, so the fix takes on the next new terminal with no copy-pasting.
+       line="export PATH=\"$dir:\$PATH\""
+       case "${SHELL:-}" in
+         */zsh) rc="$HOME/.zshrc" ;;
+         */bash) rc="$HOME/.bashrc"; [ -e "$rc" ] || rc="$HOME/.bash_profile" ;;
+         *) rc="" ;;
+       esac
+       if [ -n "$rc" ]; then
+         if [ -f "$rc" ] && grep -qF "$line" "$rc" 2>/dev/null; then
+           echo "note: $dir is already added to PATH in $rc — open a new terminal."
+         else
+           printf '\n# added by jeeves-install-cli\n%s\n' "$line" >> "$rc"
+           echo "note: added $dir to PATH in $rc — open a new terminal (or run: source $rc)."
+         fi
+       else
+         echo "note: $dir is not on your PATH. Add it, e.g.:"; echo "  echo '$line' >> ~/.profile && exec \$SHELL"
+       fi
      fi ;;
 esac

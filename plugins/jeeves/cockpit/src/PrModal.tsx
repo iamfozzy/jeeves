@@ -46,7 +46,10 @@ export function PrModal({ repoId, number, title, onClose }: { repoId: string | n
     if (!opened) { setPr(null); return }
     let cancelled = false
     setLoading(true)
-    getPrView(repoId!, number!).then((d) => { if (!cancelled) setPr(d) }).finally(() => { if (!cancelled) setLoading(false) })
+    getPrView(repoId!, number!)
+      .then((d) => { if (!cancelled) setPr(d) })
+      .catch((e) => { if (!cancelled) setPr({ error: e instanceof Error ? e.message : 'failed to load' }) })
+      .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [repoId, number, opened])
 
@@ -144,7 +147,9 @@ export function PrPane({ repoId, number, state, checks }: { repoId: string; numb
 
   useEffect(() => {
     let cancelled = false
-    getPrView(repoId, number).then((d) => { if (!cancelled) setPr(d) }).catch(() => {})
+    getPrView(repoId, number)
+      .then((d) => { if (!cancelled) setPr(d) })
+      .catch((e) => { if (!cancelled) setPr({ error: e instanceof Error ? e.message : 'failed to load' }) })
     return () => { cancelled = true }
   }, [repoId, number, state, checks])
 

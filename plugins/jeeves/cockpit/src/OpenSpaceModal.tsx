@@ -37,10 +37,15 @@ export function OpenSpaceModal({
     const b = branch.trim()
     if (!b || busy) return
     setBusy(true); setError(null)
-    const res = await createWorktree(repo.id, b)
-    setBusy(false)
-    if (res.error || !res.path) { setError(res.error ?? 'failed') ; return }
-    onOpen(res.path, res.branch ?? b)
+    try {
+      const res = await createWorktree(repo.id, b)
+      if (res.error || !res.path) { setError(res.error ?? 'failed'); return }
+      onOpen(res.path, res.branch ?? b)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'failed')
+    } finally {
+      setBusy(false)
+    }
   }
 
   const extra = (worktrees ?? []).filter((w) => !w.isMain)
@@ -193,7 +198,10 @@ export function OpenFolderModal({ onClose, onOpen }: { onClose: () => void; onOp
     setError(null); setView(f); setPath(tilde(f.path))
   }
   useEffect(() => {
-    resolveFolder('~', true).then((f) => { if (f.path) { setHome(f.path); setView(f); setPath('~') } }).catch(() => setError('could not reach the cockpit'))
+    resolveFolder('~', true).then((f) => {
+      if (f.error || !f.path) setError(f.error ?? 'not a folder')
+      else { setHome(f.path); setView(f); setPath('~') }
+    }).catch(() => setError('could not reach the cockpit'))
   }, [])
   const open = async () => {
     setBusy(true); setError(null)

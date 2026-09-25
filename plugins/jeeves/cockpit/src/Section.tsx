@@ -31,7 +31,7 @@ export function Section({ id, label, icon: Icon, accent, count, right, px = 'md'
         {count != null ? <Badge size="xs" variant="light" color={accent}>{count}</Badge> : null}
         {right ? <Box ml="auto" style={{ display: 'flex' }} onClick={(e) => e.stopPropagation()}>{right}</Box> : null}
       </Group>
-      <Collapse in={!folded}>{children}</Collapse>
+      <Collapse expanded={!folded}>{children}</Collapse>
     </Box>
   )
 }
