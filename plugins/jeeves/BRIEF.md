@@ -228,21 +228,25 @@ their follow-ups (paging, `jira-override` calls) together in the next.
    `claude_ai_Atlassian_Rovo`, i.e. `mcp__claude_ai_Atlassian_Rovo__*`) — never another Jira server,
    even if one is connected. Under the cockpit: pass each
    `tick_snapshot` `jira[].args` to `searchJiraIssuesUsingJql` unchanged (page with
-   `nextPageToken`); that entry's `qaColumns` are its QA columns. Never edit the args. Headless: one
-   call, `searchJiraIssuesUsingJql` with the defaults' `cloudId`, `maxResults: 50` (page with
-   `nextPageToken`), and `fields: [summary, status, priority, duedate, assignee,
-   <QA-assignee field>]`:
+   `nextPageToken`); that entry's `section` says where its tickets go and its `qaColumns` are its QA
+   columns. Never edit the args. Headless: two calls, `searchJiraIssuesUsingJql` with the defaults'
+   `cloudId`, `maxResults: 50` (page with `nextPageToken`), and `fields: [summary, status, priority,
+   duedate, assignee, <QA-assignee field>]`, one per section:
    ```
-   (project in (<every index Jira key>) AND sprint in openSprints()
-     AND (assignee = currentUser() OR cf[<QA field id>] = currentUser()))
-   OR key in (<ticket keys on open ledger rows>)
+   stories: (project in (<every index Jira key>) AND sprint in openSprints()
+              AND assignee = currentUser())
+            OR key in (<ticket keys on open ledger rows>)
+   qa:      project in (<every index Jira key>) AND sprint in openSprints()
+              AND cf[<QA field id>] = currentUser()
    ```
    Drop the `OR key in` clause when no ledger row names a ticket. Projects flagged `jira-override`
-   whose own values differ from the defaults → one more call of the same shape per distinct cloudId
-   / QA field / QA columns. Either way: assignee = the user → **stories**. QA field = the user →
-   **qa** (theirs to *test*, not build; a ticket can be both), in **any** status — a ticket not yet
-   in a QA column is upcoming QA, one in a QA column is ready to test now, one done is kept for the
-   sprint's record. A ledger key that comes back Done → resolve it (*State ledger*).
+   whose own values differ from the defaults → one more pair of the same shape per distinct cloudId
+   / QA field / QA columns. **The search decides the section — never the ticket's assignee, QA field
+   or status.** The stories search → **stories**, however far along it is (a ticket of the user's
+   sitting in a QA column is still their story). The qa search → **qa** (theirs to *test*, not
+   build), in **any** status — a ticket not yet in a QA column is upcoming QA, one in a QA column is
+   ready to test now, one done is kept for the sprint's record. A ticket both return is in both. A
+   ledger key that comes back Done → resolve it (*State ledger*).
 3. **Reconcile** against the ledgers: a ticket in its config's **plan trigger** status (default In
    Progress) with no ledger row → flag it under NEEDS YOU (`plan <TICKET>`) and add a `needs-plan`
    row — never plan on your own (*Planning before code*) — unless one of the user's open PRs already
@@ -319,8 +323,8 @@ terminal table; paint it, as a **full paint**.
 
 The pane is **four sections** — populate the ones that have items:
 
-- **`stories`** — **every** ticket assigned to the user in the current sprint, one row each, *always*
-  — not just the ones needing action; never trim it to the plan/review subset. Give each `item`
+- **`stories`** — **every** ticket the stories search returns, one row each, *always*, in QA
+  columns too — not just the ones needing action; never trim it to the plan/review subset. Give each `item`
   (lead with the Jira key so it links), its real Jira `status` (e.g. `"To Do"`, `"In Progress"`,
   `"Stage Test"`), and a `dot`. For a ticket in the plan → approve → implement → review flow, also
   set `phase` (the ledger's ticket state, or `blocked` / `done`) and the matching `actions` — e.g.
@@ -337,7 +341,7 @@ The pane is **four sections** — populate the ones that have items:
   (`pass`/`fail`/`pending`), `state` (`open`/`draft`/`changes requested`/`approved`), a `dot`, and
   `actions` — `[{label:"Resolve",run:"resolve 1857"}]` when changes are requested; none needed when
   it's just green and waiting (say so in `next`).
-- **`qa`** — **every** current-sprint ticket whose QA field is the user, whatever its status,
+- **`qa`** — **every** ticket the qa search returns (its QA field is the user), whatever its status,
   **highest priority first**. Set `priority`, its real Jira `status`, and a `dot`: yellow (red if
   high priority or blocking a release) once it's in a **QA column** — ready to test now — with
   `actions` `[{label:"Test",run:"qa ABC-5481"}]` (the key, not a row number, so it survives

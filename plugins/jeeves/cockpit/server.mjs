@@ -1367,10 +1367,12 @@ function tickDelta(prev, next) {
   return out
 }
 
-// The Jira searches the orchestrator runs (BRIEF step 2): one per distinct
-// cloudId / QA field / QA columns across the projects' effective configs, each
-// with its projects' keys and the ticket keys on their open ledger rows. QA is
-// the QA field = the user in any status; qaColumns rides along to colour the rows.
+// The Jira searches the orchestrator runs (BRIEF step 2): per distinct cloudId / QA
+// field / QA columns across the projects' effective configs, a `stories` search
+// (assignee = the user, plus the ticket keys on open ledger rows) and a `qa` search
+// (the QA field = the user, any status). The section is the search that found the
+// ticket, so nothing has to match people fields against the user; a ticket in both
+// is in both. qaColumns rides along on the qa search to colour its rows.
 function tickJiraCalls(repos, defaultsMd, projectMd, ledgerMd) {
   const groups = new Map()
   const group = (cloudId, qaField, qaColumns) => {
@@ -1398,16 +1400,14 @@ function tickJiraCalls(repos, defaultsMd, projectMd, ledgerMd) {
   for (const g of groups.values()) {
     const id = g.qaField?.match(/^customfield_(\d+)$/)?.[1]
     const cf = g.qaField && (id ? `cf[${id}]` : `"${g.qaField}"`)
-    const who = cf ? `(assignee = currentUser() OR ${cf} = currentUser())` : 'assignee = currentUser()'
-    const sprint = `sprint in openSprints() AND ${who}`
-    const mine = g.keys.size ? `project in (${[...g.keys].join(', ')}) AND ${sprint}` : repos.length ? null : sprint
-    const led = g.ledger.size ? `key in (${[...g.ledger].join(', ')})` : null
-    const jql = mine && led ? `(${mine}) OR ${led}` : mine || led
-    if (!jql) continue
+    const scope = (who) => { const s = `sprint in openSprints() AND ${who}`; return g.keys.size ? `project in (${[...g.keys].join(', ')}) AND ${s}` : repos.length ? null : s }
     const fields = ['summary', 'status', 'priority', 'duedate', 'assignee', ...(g.qaField ? [g.qaField] : [])]
-    const call = { args: { cloudId: g.cloudId, jql, fields, maxResults: 50 } }
-    if (g.qaColumns) call.qaColumns = g.qaColumns
-    calls.push(call)
+    const search = (section, jql) => ({ section, args: { cloudId: g.cloudId, jql, fields, maxResults: 50 } })
+    const mine = scope('assignee = currentUser()'), led = g.ledger.size ? `key in (${[...g.ledger].join(', ')})` : null
+    const stories = mine && led ? `(${mine}) OR ${led}` : mine || led
+    if (stories) calls.push(search('stories', stories))
+    const qa = cf && scope(`${cf} = currentUser()`)
+    if (qa) calls.push({ ...search('qa', qa), ...(g.qaColumns ? { qaColumns: g.qaColumns } : {}) })
   }
   return calls
 }
@@ -3184,7 +3184,7 @@ function buildMcpServer(role, caller) {
     description: 'Run the tick\'s GitHub query (BRIEF *Each tick* step 1) server-side from the project index and return its PRs per project, plus the exact Jira call(s) for step 2. Compact JSON:\n'
       + '- `projects: { <project id>: { myPrs, reviews } }` on the first call of this session or with full: true. A PR is { number, title, url, head, base, headRefOid, isDraft?, reviewDecision?, checks? (pass/fail/pending), missingKey? (own non-draft PR without its project\'s Jira key) }; a review candidate adds author, requested? (the user is asked to review), reviewers? (requested logins/teams), myReview? { state, oid } (the user\'s latest review). Absent = false/none; a project with no PRs is absent. Only configured repos (every repo, keyed owner/name, when none are configured).\n'
       + '- `delta: { <project id>: { myPrs?, reviews?: { added?: [PR], changed?: [{ number, <field>: <new value, null = gone> }], removed?: [number] }, unchanged } }` on later calls — only what changed since this session\'s last complete call.\n'
-      + '- `jira: [{ args, qaColumns? }]`: pass each `args` as-is to ' + `mcp__${cfg('atlassianServer')}__searchJiraIssuesUsingJql` + ' (page with nextPageToken); qaColumns are that call\'s QA columns, for colouring QA rows.\n'
+      + '- `jira: [{ section, args, qaColumns? }]`: pass each `args` as-is to ' + `mcp__${cfg('atlassianServer')}__searchJiraIssuesUsingJql` + ' (page with nextPageToken). `section` is where its tickets go: "stories" (assigned to the user, plus ledger keys) or "qa" (the user is QA); a ticket both return is in both. Never re-sort a ticket by its assignee, QA field or status. qaColumns are the qa call\'s QA columns, for colouring its rows.\n'
       + '- `incomplete: { <alias>: reason }` with whole `projects`: a later page failed, so those searches are cut short — do not resolve rows missing from them. The next call deltas against the last complete one.\n'
       + '- `{ error, jira }`: gh is missing, unauthenticated or the query failed — run the Jira call(s) anyway and report GitHub as unavailable.\n'
       + '- With full: true, also `index: [{ id, repo, path, jiraKey, baseBranch, repoWide, jiraOverride }]` (the projects; repoWide = reviews every teammate PR, jiraOverride = sets its own Jira site or QA fields), `ledgers: { <project id>: { ledger: true, rows: [{ kind, id, state, next, since, extra }] } | { ledger: false, raw } }` (each state.md parsed), and `agents: [{ name, description }]` (what dispatch can run).\n'

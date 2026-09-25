@@ -957,7 +957,23 @@ test('tick_snapshot full flags repo-wide and Jira-overriding projects', { skip: 
   } finally { writeFileSync(f, was); await client.close() }
 })
 
-test('a file diff over 1 MB comes back whole', { skip: POSIX !== true && POSIX }, async () => {
+test('tick_snapshot splits Jira into a stories search and a qa search', { skip: POSIX !== true && POSIX }, async () => {
+  const { client, call } = await mcpClient()
+  const f = join(DATA, 'projects', 'demo', 'project.md'), was = readFileSync(f, 'utf8')
+  try {
+    writeFileSync(f, was + '\n## Jira\n- **project key:** `ABC`\n- **cloudId:** `c1` (acme)\n- **QA-assignee field:** `customfield_12345`\n- **QA columns:** `QA`\n')
+    await api('/api/config')
+    const jira = JSON.parse(await call('tick_snapshot', { full: true })).jira
+    const by = Object.fromEntries(jira.map((c) => [c.section, c]))
+    assert.deepEqual(Object.keys(by).sort(), ['qa', 'stories'])
+    assert.match(by.stories.args.jql, /assignee = currentUser\(\)/)
+    assert.doesNotMatch(by.stories.args.jql, /cf\[12345\]/)
+    assert.match(by.qa.args.jql, /^project in \(ABC\) AND sprint in openSprints\(\) AND cf\[12345\] = currentUser\(\)$/)
+    assert.deepEqual([by.qa.qaColumns, by.stories.qaColumns], [['QA'], undefined])
+  } finally { writeFileSync(f, was); await api('/api/config'); await client.close() }
+})
+
+test('a file diff over 1 MB comes back whole',{ skip: POSIX !== true && POSIX }, async () => {
   const dir = join(HOME, 'bigdiff')
   mkdirSync(dir, { recursive: true })
   git(dir, 'init', '-q', '-b', 'main')
